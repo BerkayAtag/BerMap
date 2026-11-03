@@ -27,6 +27,14 @@ public class SimulationEngine : ISimulationEngine
     private static readonly HashSet<string> ExcludedEdgeTypes = new(StringComparer.OrdinalIgnoreCase)
     { "Contains", "MemberOf", "ManagedBy", "Trusts", "PossibleDuplicate" };
 
+    // Shared infrastructure never depends on a single workload: a VM going
+    // down does not take its portgroup, datastore or host down with it.
+    private static readonly HashSet<string> InfrastructureNodeTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Datacenter", "Site", "Forest", "Domain", "OrganizationalUnit", "Cluster", "Hypervisor",
+        "ResourcePool", "Storage", "Datastore", "Network", "NetworkDevice", "Group"
+    };
+
     private readonly IGraphService _graphService;
 
     public SimulationEngine(IGraphService graphService)
@@ -114,9 +122,15 @@ public class SimulationEngine : ISimulationEngine
         string directEntityLabel)
     {
         var nodesById = graph.Nodes.ToDictionary(n => n.Id);
+        var targetIsInfrastructure = InfrastructureNodeTypes.Contains(targetNode.NodeType);
 
         // ---- Step 1: direct hits -------------------------------------------------
-        var directHitIds = new List<Guid>();
+        // Placement edges point from the dependent to what it runs on
+        // (vm -HostedOn-> host, vm -UsesStorage-> datastore), so only their
+        // source is hit; a failed VM never takes its host or datastore down.
+        // Connectivity edges are symmetric, except that a workload never takes
+        // shared infrastructure down with it.
+        var directHits = new List<(Guid Id, string Path)>();
 
         foreach (var rel in graph.Relationships)
         {
@@ -124,17 +138,26 @@ public class SimulationEngine : ISimulationEngine
 
             Guid other;
             if (rel.TargetNodeId == targetNode.Id) other = rel.SourceNodeId;
-            else if (rel.SourceNodeId == targetNode.Id) other = rel.TargetNodeId;
+            else if (rel.SourceNodeId == targetNode.Id &&
+                     MatchesAny(rel.RelationshipType, new[] { "ConnectedTo", "ConnectsThrough" })) other = rel.TargetNodeId;
             else continue;
 
-            // Outbound business dependencies (e.g. vm -UsesStorage-> datastore hits
-            // both directions: use the endpoint that is the workload).
-            if (directHitIds.Contains(other)) continue;
-            directHitIds.Add(other);
+            if (!targetIsInfrastructure && nodesById.TryGetValue(other, out var otherNode) &&
+                InfrastructureNodeTypes.Contains(otherNode.NodeType))
+                continue;
+
+            if (directHits.Any(h => h.Id == other)) continue;
+            directHits.Add((other, $"{targetNode.Name} -> [DOWN] -> {nodesById.GetValueOrDefault(other)?.Name ?? other.ToString()}"));
         }
 
+        // A workload target (VM, server, database...) is itself the failed
+        // entity in every scenario: what breaks first is whatever depends on it.
+        if (directHits.Count == 0 && !targetIsInfrastructure)
+            directHits.AddRange(FindDependents(new HashSet<Guid> { targetNode.Id }, graph, nodesById));
+
+        var directHitIds = directHits.Select(h => h.Id).ToList();
         var directHitSet = new HashSet<Guid>(directHitIds);
-        foreach (var hitId in directHitIds)
+        foreach (var (hitId, path) in directHits)
         {
             var hitNode = nodesById.GetValueOrDefault(hitId);
             result.ConfirmedImpacts.Add(new ImpactedEntityDto
@@ -143,7 +166,7 @@ public class SimulationEngine : ISimulationEngine
                 Name = hitNode?.Name ?? hitId.ToString(),
                 Type = hitNode?.NodeType ?? directEntityLabel,
                 ImpactLevel = "Confirmed",
-                DependencyPath = $"{targetNode.Name} -> [DOWN] -> {hitNode?.Name ?? hitId.ToString()}",
+                DependencyPath = path,
             });
         }
 
@@ -154,7 +177,7 @@ public class SimulationEngine : ISimulationEngine
 
         foreach (var (dependentId, path) in FindDependents(directHitSet, graph, nodesById))
         {
-            if (directHitSet.Contains(dependentId)) continue;
+            if (directHitSet.Contains(dependentId) || dependentId == targetNode.Id) continue;
             if (!probableByEntity.ContainsKey(dependentId))
             {
                 var node = nodesById.GetValueOrDefault(dependentId);
@@ -177,7 +200,8 @@ public class SimulationEngine : ISimulationEngine
         // ---- Step 3: dependents of probable hits (possible) -----------------------
         foreach (var (dependentId, path) in FindDependents(probableSet, graph, nodesById))
         {
-            if (directHitSet.Contains(dependentId) || probableSet.Contains(dependentId)) continue;
+            if (directHitSet.Contains(dependentId) || probableSet.Contains(dependentId) ||
+                dependentId == targetNode.Id) continue;
 
             var node = nodesById.GetValueOrDefault(dependentId);
             result.PossibleImpacts.Add(new ImpactedEntityDto
@@ -241,11 +265,21 @@ public class SimulationEngine : ISimulationEngine
                 continue;
             }
 
-            if (hitSet.Contains(dependentId) || !seen.Add(dependentId)) continue;
+            if (hitSet.Contains(dependentId)) continue;
 
-            var hitName = nameById.GetValueOrDefault(hitId, hitId.ToString());
-            var depName = nameById.GetValueOrDefault(dependentId, dependentId.ToString());
-            found.Add((dependentId, $"{hitName} -> [{rel.RelationshipType}] -> {depName}"));
+            var hitIsInfrastructure = nodesById.TryGetValue(hitId, out var hitNode) &&
+                                      InfrastructureNodeTypes.Contains(hitNode.NodeType);
+            var dependentIsInfrastructure = nodesById.TryGetValue(dependentId, out var dependentNode) &&
+                                            InfrastructureNodeTypes.Contains(dependentNode.NodeType);
+            if (dependentIsInfrastructure && !hitIsInfrastructure) continue;
+
+            if (!seen.Add(dependentId)) continue;
+
+            // The path shows the edge as stored (source -> target), so
+            // "app -[DependsOn]-> db" reads as the dependency it is.
+            var sourceName = nameById.GetValueOrDefault(rel.SourceNodeId, rel.SourceNodeId.ToString());
+            var targetName = nameById.GetValueOrDefault(rel.TargetNodeId, rel.TargetNodeId.ToString());
+            found.Add((dependentId, $"{sourceName} -> [{rel.RelationshipType}] -> {targetName}"));
         }
 
         return found;
@@ -355,14 +389,17 @@ public class SimulationEngine : ISimulationEngine
         if (headroom != null && headroom.HasCapacityForFailover)
         {
             recommendations.Add(
-                $"Cluster headroom is sufficient for the modelled outage: CPU {headroom.RemainingCpuPercent:F1}%, RAM {headroom.RemainingRamPercent:F1}% remaining.");
+                string.Create(CultureInfo.InvariantCulture,
+                    $"Cluster headroom is sufficient for the modelled outage: CPU {headroom.RemainingCpuPercent:F1}%, RAM {headroom.RemainingRamPercent:F1}% remaining."));
         }
 
-        var hostedVmCount = result.ConfirmedImpacts.Count(i => i.Type.Equals("VirtualMachine", StringComparison.OrdinalIgnoreCase));
-        if (hostedVmCount > 0)
+        // Reconciled nodes keep their most specific type (a VM that is also an
+        // AD domain controller is a DomainController), so count every direct hit.
+        var directCount = result.ConfirmedImpacts.Count;
+        if (directCount > 0)
         {
             recommendations.Add(
-                $"{hostedVmCount} virtual machine(s) directly attached to {targetNode.Name} will be unavailable while the fault persists.");
+                $"{directCount} workload(s) directly attached to {targetNode.Name} will be unavailable while the fault persists.");
         }
 
         var haEnabled = false;

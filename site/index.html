@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="BerMap: kurum içi altyapı keşfi, bağımlılık haritası, etki analizi ve dijital ikiz simülasyonu.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="BerMap — Altyapı İstihbaratı ve Dijital İkiz">
+<meta property="og:description" content="Active Directory ve vCenter'ı salt okunur keşfedin, varlıkları tek grafta uzlaştırın, bir değişikliğin etkisini üretime dokunmadan simüle edin.">
+<meta property="og:image" content="https://berkayatag.github.io/BerMap/assets/dashboard.png">
+<title>BerMap — Altyapı İstihbaratı ve Dijital İkiz</title>
+<link rel="icon" type="image/svg+xml" href="assets/bermap.svg">
+<link rel="stylesheet" href="style.css?v=0.1.0">
+<script>
+  // Varsayılan aydınlık tema; ziyaretçinin seçimi bu tarayıcıda hatırlanır.
+  // Sayfa boyanmadan önce uygulanır, böylece tema geçişinde yanıp sönme olmaz.
+  (function () {
+    var theme = 'light';
+    try { if (localStorage.getItem('bermap.site.theme') === 'dark') theme = 'dark'; } catch (e) {}
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
+</head>
+<body>
+<a class="skip" href="#main">İçeriğe geç</a>
+<header class="top">
+  <a class="brand" href="#"><img src="assets/bermap.svg" alt="" width="36" height="36"><span>BerMap<small>Infrastructure Intelligence &amp; Digital Twin</small></span></a>
+  <nav aria-label="Ana menü">
+    <a href="#ozellikler">Özellikler</a>
+    <a href="#ekranlar">Ekranlar</a>
+    <a href="#mimari">Mimari</a>
+    <a href="#kurulum">Kurulum</a>
+    <a href="https://github.com/BerkayAtag/BerMap">GitHub ↗</a>
+  </nav>
+  <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false" aria-label="Karanlık temaya geç" title="Karanlık temaya geç">
+    <svg class="icon-moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    <svg class="icon-sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow" lang="en">Sürüm 0.1 · Önizleme · Windows Server ve Linux</p>
+      <h1>Altyapınızı haritalayın.<br><em>Değişikliği önce ikizde deneyin.</em></h1>
+      <p class="lead">BerMap, Active Directory ve vCenter'ı salt okunur keşfeder, sunucuları, sanal makineleri ve bağımlılıkları tek bir grafta uzlaştırır. Bir host çökerse neyin etkileneceğini üretime dokunmadan görürsünüz.</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/BerkayAtag/BerMap">Kaynak koda git <span aria-hidden="true">↗</span></a>
+        <a class="link" href="https://github.com/BerkayAtag/BerMap#readme">Belgeleri incele →</a>
+      </div>
+      <ul class="facts">
+        <li>Tamamen kurum içi</li>
+        <li>Salt okunur keşif</li>
+        <li>PostgreSQL tek veri deposu</li>
+        <li>Aydınlık ve karanlık tema</li>
+      </ul>
+    </div>
+    <figure class="hero-shot">
+      <img src="assets/dashboard.png" data-light-src="assets/dashboard.png" data-dark-src="assets/dashboard-dark.png"
+           data-light-alt="BerMap gösterge paneli, aydınlık tema: varlık sayıları, sistem sağlığı ve son değişiklikler"
+           data-dark-alt="BerMap gösterge paneli, karanlık tema: varlık sayıları, sistem sağlığı ve son değişiklikler"
+           alt="BerMap gösterge paneli, aydınlık tema: varlık sayıları, sistem sağlığı ve son değişiklikler" width="1440" height="900">
+      <figcaption data-light-text="Gerçek uygulama ekranı · aydınlık tema · sentetik demo verisi" data-dark-text="Gerçek uygulama ekranı · karanlık tema · sentetik demo verisi">Gerçek uygulama ekranı · aydınlık tema · sentetik demo verisi</figcaption>
+    </figure>
+  </section>
+
+  <section class="section" id="ozellikler">
+    <div class="section-head">
+      <p class="eyebrow">Keşiften simülasyona</p>
+      <h2>Bir envanterden fazlası.<br><em>Yaşayan bir altyapı grafı.</em></h2>
+    </div>
+    <div class="features">
+      <article><span class="num">01 / Keşif</span><h3>Salt okunur adaptörler</h3><p>Active Directory (LDAPS, sayfalı arama) ve vCenter (REST + PropertyCollector) okunur; kaynak sistemlere hiçbir yazma işlemi yapılmaz. Kimlik bilgileri AES-GCM ile şifreli kasada saklanır.</p></article>
+      <article><span class="num">02 / Uzlaştırma</span><h3>Tek varlık, çok kaynak</h3><p>Bir sunucu AD'de bilgisayar, vCenter'da sanal makine olarak görünür. SID, BIOS UUID ve FQDN ile tek düğümde birleşir; yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.</p></article>
+      <article><span class="num">03 / Harita</span><h3>Bağımlılık grafı</h3><p>Datacenter, cluster, host, VM, datastore, ağ ve uygulama ilişkileri etkileşimli haritada. Eski (stale) kayıtlar silinmez, geçmiş bağlam için işaretlenir.</p></article>
+      <article><span class="num">04 / Etki</span><h3>Patlama yarıçapı</h3><p>Bir düğüm seçin; ona bağlı uygulamaları, veritabanlarını ve servisleri derinlik ve güven düzeyiyle görün. Değişiklik toplantısına kanıtla gelin.</p></article>
+      <article><span class="num">05 / BerTwin</span><h3>Dijital ikiz simülasyonu</h3><p>Host arızası, datastore kaybı ve ağ bölünmesi senaryoları deterministik motorla hesaplanır; cluster'da failover için CPU ve bellek payı kalıyor mu, risk puanı ne, görürsünüz.</p></article>
+      <article><span class="num">06 / Denetim</span><h3>Snapshot ve iz kaydı</h3><p>Grafın değişmez, hash'li anlık görüntülerini alın ve karşılaştırın. Giriş, entegrasyon ve keşif işlemlerinin her biri kullanıcı adıyla denetim kaydı bırakır.</p></article>
+    </div>
+  </section>
+
+  <section class="section" id="ekranlar">
+    <div class="section-head">
+      <p class="eyebrow">Ekranlar</p>
+      <h2>Aydınlık varsayılan.<br><em>Karanlık, bir tık uzakta.</em></h2>
+      <p class="muted">Sağ üstteki düğme bu sayfanın temasını değiştirir; ekran görüntüleri de seçtiğiniz temaya geçer.</p>
+    </div>
+    <div class="gallery">
+      <figure>
+        <img src="assets/map.png" data-light-src="assets/map.png" data-dark-src="assets/map-dark.png" alt="BerMap altyapı haritası: cluster, host, sanal makine ve datastore ilişkileri" width="1440" height="900" loading="lazy">
+        <figcaption>Altyapı Haritası · cluster, host, VM ve depolama ilişkileri</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/inventory.png" data-light-src="assets/inventory.png" data-dark-src="assets/inventory-dark.png" alt="BerMap envanter ekranı: çok kaynaklı uzlaştırılmış varlık listesi" width="1440" height="900" loading="lazy">
+        <figcaption>Envanter · AD ve vCenter'dan uzlaştırılmış varlıklar</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/simulation.png" data-light-src="assets/simulation.png" data-dark-src="assets/simulation-dark.png" alt="BerMap simülasyon stüdyosu: host arızası senaryosunun etki ve risk sonucu" width="1440" height="900" loading="lazy">
+        <figcaption>Simülasyon Stüdyosu · host arızası senaryosu</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/impact.png" data-light-src="assets/impact.png" data-dark-src="assets/impact-dark.png" alt="BerMap etki analizi: seçilen veritabanına bağımlı uygulamalar" width="1440" height="900" loading="lazy">
+        <figcaption>Etki Analizi · bağımlı uygulamalar ve servisler</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" id="mimari">
+    <div class="section-head">
+      <p class="eyebrow">Kurum içi mimari</p>
+      <h2>Veri kurumda kalır.<br><em>Kaynak sistemler yalnız okunur.</em></h2>
+    </div>
+    <div class="flow" aria-label="Kaynak sistemler salt okunur olarak BerMap sunucusu ya da collector tarafından okunur. BerMap PostgreSQL kullanır; operatörler web konsolundan bağlanır.">
+      <div><span>Kaynak sistemler</span><h3>AD · vCenter</h3><p>LDAPS 636 / HTTPS 443<br>Salt okunur servis hesabı<br>Uzak ağlarda collector</p></div>
+      <strong class="arrow">salt okunur →</strong>
+      <div class="central"><span>Kurum sunucusu</span><h3>BerMap API + keşif işçisi</h3><p>Uzlaştırma · Graf · Simülasyon · Denetim</p><div class="services"><span>PostgreSQL</span><span>.NET 10</span><span>Şifreli kasa</span></div></div>
+      <strong class="arrow">← HTTPS</strong>
+      <div><span>Operatör</span><h3>Web konsolu</h3><p>Yerel hesap ve roller<br>Harita ve etki analizi<br>BerTwin simülasyonu</p></div>
+    </div>
+    <p class="note">Collector yalnız dışarı yönlü bağlantı kurar ve kayıt token'ıyla kimlik doğrular; sunucuya ulaşamadığında verileri yerel kuyrukta tutar. GitHub Pages yalnız bu tanıtım sayfasını sunar; konsol ve envanter verileri GitHub'da çalışmaz.</p>
+  </section>
+
+  <section class="section" id="kurulum">
+    <div class="section-head">
+      <p class="eyebrow">Kaynaktan kurulum</p>
+      <h2>Üç bileşen.<br><em>Şema ilk açılışta kurulur.</em></h2>
+    </div>
+    <div class="install">
+      <ol class="steps">
+        <li><b>Hazırlayın</b><span>.NET 10 SDK, Node.js 20+ ve PostgreSQL 16+ kurun; BerMap için bir veritabanı ve kullanıcı oluşturun.</span></li>
+        <li><b>Yapılandırın</b><span>appsettings dosyasında bağlantı dizesini, kasa dizinini ve collector kayıt token'ını ayarlayın. İsterseniz ilk yönetici parolasını da verin.</span></li>
+        <li><b>Çalıştırın</b><span>API ilk açılışta migration'ları uygular, rolleri ve <code>admin</code> hesabını oluşturur. Parola verilmediyse üretilen parola kasa dizinindeki dosyaya yazılır.</span></li>
+        <li><b>Bağlayın</b><span>Konsola giriş yapın, Entegrasyonlar ekranından AD ve vCenter'ı ekleyin, bağlantıyı test edip ilk keşfi başlatın.</span></li>
+      </ol>
+      <figure class="install-shot">
+        <img src="assets/integrations.png" data-light-src="assets/integrations.png" data-dark-src="assets/integrations-dark.png" alt="BerMap entegrasyon yönetimi: Active Directory ve vCenter bağlantıları ve keşif işleri" width="1440" height="900" loading="lazy">
+      </figure>
+    </div>
+    <div class="downloads">
+      <a class="button" href="https://github.com/BerkayAtag/BerMap">GitHub deposu <span aria-hidden="true">↗</span></a>
+      <a class="button secondary" href="https://github.com/BerkayAtag/BerMap#5-quick-start-development">Hızlı başlangıç</a>
+      <a class="link" href="https://github.com/BerkayAtag/BerMap/tree/main/docs/architecture">Mimari belgeler →</a>
+      <a class="link" href="https://github.com/BerkayAtag/BerMap/blob/main/docs/architecture/13-installation-upgrade.md">Kurulum ve yükseltme →</a>
+    </div>
+    <p class="note">BerMap önizleme sürümündedir: hazır kurulum paketi yoktur ve zamanlanmış (cron) keşif henüz çalışmaz, keşif konsoldan başlatılır. Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.</p>
+  </section>
+</main>
+
+<footer>
+  <span>© 2026 Berkay Atağ · BerMap</span>
+  <a href="https://github.com/BerkayAtag/BerMap">GitHub</a>
+  <a href="https://github.com/BerkayAtag/BerMap/blob/main/SECURITY.md">Güvenlik</a>
+  <a href="https://github.com/BerkayAtag/BerMap/blob/main/CHANGELOG.md">Sürüm geçmişi</a>
+</footer>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var button = document.getElementById('theme-toggle');
+
+    function apply(theme) {
+      var dark = theme === 'dark';
+      root.setAttribute('data-theme', theme);
+      var label = dark ? 'Aydınlık temaya geç' : 'Karanlık temaya geç';
+      button.setAttribute('aria-pressed', String(dark));
+      button.setAttribute('aria-label', label);
+      button.setAttribute('title', label);
+
+      // Ekran görüntüleri ve açıklamaları seçilen temaya göre değişir.
+      var mode = dark ? 'dark' : 'light';
+      document.querySelectorAll('img[data-light-src]').forEach(function (img) {
+        var src = img.getAttribute('data-' + mode + '-src');
+        if (img.getAttribute('src') !== src) img.setAttribute('src', src);
+        var alt = img.getAttribute('data-' + mode + '-alt');
+        if (alt) img.setAttribute('alt', alt);
+      });
+      document.querySelectorAll('[data-light-text]').forEach(function (el) {
+        el.textContent = el.getAttribute('data-' + mode + '-text');
+      });
+    }
+
+    apply(root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+
+    button.addEventListener('click', function () {
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      apply(next);
+      try { localStorage.setItem('bermap.site.theme', next); } catch (e) {}
+    });
+  })();
+</script>
+</body>
+</html>

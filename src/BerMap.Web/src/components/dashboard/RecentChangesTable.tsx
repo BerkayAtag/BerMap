@@ -144,10 +144,7 @@ export const RecentChangesTable: React.FC<RecentChangesTableProps> = ({
                   </td>
                   <td className="py-3">
                     <div className="flex items-center gap-1.5">
-                      <StatusIndicator status={toNodeStatus(change.status)} size="sm" />
-                      <span className="text-xs capitalize text-neutral-600 dark:text-neutral-400">
-                        {change.status}
-                      </span>
+                      <StatusIndicator status={toNodeStatus(change.status)} size="sm" showLabel />
                     </div>
                   </td>
                   <td className="py-3 text-right pr-1 text-xs text-neutral-400 dark:text-neutral-500 font-mono">

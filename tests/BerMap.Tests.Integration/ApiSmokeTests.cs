@@ -114,6 +114,13 @@ public sealed class ApiSmokeTests : IAsyncLifetime
         request.Headers.Add("X-BerMap-Enrollment-Token", "integration-test-token");
         var registered = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        var firstId = (await registered.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("collectorId").GetString();
+
+        // Re-enrolling with the same name and host reuses the collector row.
+        using var again = new HttpRequestMessage(HttpMethod.Post, "/api/collectors/register") { Content = JsonContent.Create(body) };
+        again.Headers.Add("X-BerMap-Enrollment-Token", "integration-test-token");
+        var second = await client.SendAsync(again);
+        Assert.Equal(firstId, (await second.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("collectorId").GetString());
     }
 
     [Fact]

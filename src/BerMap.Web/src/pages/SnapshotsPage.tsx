@@ -22,6 +22,9 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/i18n';
+import { useT } from '@/lib/i18n-runtime';
+import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { useCanOperate } from '@/stores/authStore';
 import {
   formatDateTime,
   formatNumber,
@@ -231,6 +234,18 @@ export const SnapshotsPage: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const t = useT();
+  const canOperate = useCanOperate();
+
+  // Escape closes the top-most open dialog.
+  const anyDialogOpen = isCreateOpen || isDiffOpen || Boolean(detailSnapshotId) || verification !== null;
+  useEscapeKey(anyDialogOpen, () => {
+    if (verification) setVerification(null);
+    else if (detailSnapshotId) setDetailSnapshotId(null);
+    else if (isDiffOpen) setIsDiffOpen(false);
+    else if (isCreateOpen && !creating) setIsCreateOpen(false);
+  });
+
   const snapshotsQuery = useQuery<SnapshotSummary[]>({
     queryKey: ['snapshots', 'list'],
     queryFn: () => api.get<SnapshotSummary[]>('/snapshots'),
@@ -276,7 +291,7 @@ export const SnapshotsPage: React.FC = () => {
         description: newDesc.trim(),
       };
       const created = await api.post<SnapshotSummary>('/snapshots', request);
-      await queryClient.invalidateQueries({ queryKey: ['snapshots', 'list'] });
+      await queryClient.invalidateQueries({ queryKey: ['snapshots'] });
       setNotice(
         isTr
           ? `${created.name} snapshot'ı v${created.snapshotVersion} olarak mühürlendi (${formatNumber(
@@ -391,6 +406,8 @@ export const SnapshotsPage: React.FC = () => {
             variant="primary"
             size="sm"
             onClick={openCreate}
+            disabled={!canOperate}
+            title={canOperate ? undefined : t('noPermission')}
             className="gap-2 bg-brand-primary"
           >
             <Plus className="w-4 h-4" />
@@ -493,6 +510,8 @@ export const SnapshotsPage: React.FC = () => {
             size="sm"
             className="mt-4 gap-2 bg-brand-primary"
             onClick={openCreate}
+            disabled={!canOperate}
+            title={canOperate ? undefined : t('noPermission')}
           >
             <Plus className="w-4 h-4" />
             {isTr ? 'İlk Snapshot\'ı Al' : 'Take First Snapshot'}

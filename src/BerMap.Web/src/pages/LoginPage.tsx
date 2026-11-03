@@ -1,12 +1,18 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { Lock, User, ShieldCheck } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Lock, User as UserIcon, ShieldCheck } from 'lucide-react';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import type { ApiError, User } from '@/types';
+
+function getRedirectTarget(state: unknown): string {
+  const from = (state as { from?: unknown } | null)?.from;
+  return typeof from === 'string' && from.startsWith('/') && !from.startsWith('/login') ? from : '/';
+}
 
 export const LoginPage: React.FC = () => {
   const locale = useLocale();
@@ -16,7 +22,17 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
-  const { login } = useAuthStore();
+  const location = useLocation();
+  const login = useAuthStore((state) => state.login);
+  const token = useAuthStore((state) => state.token);
+  const usernameId = useId();
+  const passwordId = useId();
+  const errorId = useId();
+  const redirectTo = getRedirectTarget(location.state);
+
+  if (token && !submitting) {
+    return <Navigate to={redirectTo} replace />;
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,23 +45,33 @@ export const LoginPage: React.FC = () => {
     try {
       const response = await api.post<{
         token: string;
-        user: { id: string; username: string; displayName: string; role: string; email: string };
+        expiresAt: string;
+        user: User;
       }>('/auth/login', { username: username.trim(), password });
-      login(
-        {
-          id: response.user.id,
-          username: response.user.username,
-          displayName: response.user.displayName,
-          email: response.user.email,
-          role: response.user.role,
-        },
-        response.token,
-      );
-      navigate('/');
+      login(response.user, response.token);
+      setSubmitting(false);
+      navigate(redirectTo, { replace: true });
     } catch (err) {
-      const apiError = err as { message?: string };
-      setError(apiError?.message || (isTr ? 'Giriş başarısız.' : 'Login failed.'));
-    } finally {
+      const apiError = err as Partial<ApiError>;
+      if (apiError?.status === 429) {
+        setError(
+          apiError.message && apiError.message !== 'Too Many Requests'
+            ? apiError.message
+            : isTr
+              ? 'Çok fazla giriş denemesi. Lütfen bir dakika sonra tekrar deneyin.'
+              : 'Too many sign-in attempts. Please try again in a minute.',
+        );
+      } else if (apiError?.status === 401) {
+        setError(
+          apiError.message && apiError.message !== 'Unauthorized'
+            ? apiError.message
+            : isTr
+              ? 'Kullanıcı adı veya parola hatalı.'
+              : 'Invalid username or password.',
+        );
+      } else {
+        setError(apiError?.message || (isTr ? 'Giriş başarısız.' : 'Login failed.'));
+      }
       setSubmitting(false);
     }
   };
@@ -61,20 +87,24 @@ export const LoginPage: React.FC = () => {
           <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-white">
             Ber<span className="text-brand-primary dark:text-brand-primary-dark">Map</span> Web Console
           </h1>
-          <p className="text-xs uppercase tracking-widest font-semibold text-neutral-500 mt-1">
+          <p lang="en" className="text-xs uppercase tracking-widest font-semibold text-neutral-500 mt-1">
             Enterprise Infrastructure Intelligence · BerSim Ready
           </p>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400 mb-1.5">
+            <label htmlFor={usernameId} className="block text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400 mb-1.5">
               {isTr ? 'Kullanıcı Adı veya Kurumsal Kimlik' : 'Username or Corporate Identity'}
             </label>
             <div className="relative">
-              <User className="w-4 h-4 absolute left-3 top-3 text-neutral-400" />
+              <UserIcon className="w-4 h-4 absolute left-3 top-3 text-neutral-400" aria-hidden="true" />
               <Input
+                id={usernameId}
                 type="text"
+                autoComplete="username"
+                autoFocus
+                aria-describedby={error ? errorId : undefined}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="pl-9"
@@ -84,13 +114,16 @@ export const LoginPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400 mb-1.5">
+            <label htmlFor={passwordId} className="block text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400 mb-1.5">
               {isTr ? 'Parola' : 'Password'}
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 absolute left-3 top-3 text-neutral-400" />
+              <Lock className="w-4 h-4 absolute left-3 top-3 text-neutral-400" aria-hidden="true" />
               <Input
+                id={passwordId}
                 type="password"
+                autoComplete="current-password"
+                aria-describedby={error ? errorId : undefined}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="pl-9"
@@ -100,7 +133,7 @@ export const LoginPage: React.FC = () => {
           </div>
 
           {error && (
-            <div className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300">
+            <div id={errorId} role="alert" className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300">
               {error}
             </div>
           )}

@@ -7,6 +7,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { useT, type TranslationKey } from '@/lib/i18n-runtime';
 
 interface StatusIndicatorProps {
   status: NodeStatus;
@@ -14,13 +15,15 @@ interface StatusIndicatorProps {
   showIcon?: boolean;
   size?: 'sm' | 'md' | 'lg';
   className?: string;
+  /** Overrides the accessible label (defaults to the localized status name). */
+  label?: string;
 }
 
-const statusConfig: Record<NodeStatus, { label: string; dotClass: string; Icon: LucideIcon }> = {
-  healthy: { label: 'Healthy', dotClass: 'bg-status-healthy', Icon: CheckCircle2 },
-  warning: { label: 'Warning', dotClass: 'bg-status-warning', Icon: AlertTriangle },
-  critical: { label: 'Critical', dotClass: 'bg-status-critical', Icon: XCircle },
-  unknown: { label: 'Unknown', dotClass: 'bg-status-unknown', Icon: HelpCircle },
+const statusConfig: Record<NodeStatus, { labelKey: TranslationKey; dotClass: string; Icon: LucideIcon }> = {
+  healthy: { labelKey: 'statusHealthy', dotClass: 'bg-status-healthy', Icon: CheckCircle2 },
+  warning: { labelKey: 'statusWarning', dotClass: 'bg-status-warning', Icon: AlertTriangle },
+  critical: { labelKey: 'statusCritical', dotClass: 'bg-status-critical', Icon: XCircle },
+  unknown: { labelKey: 'statusUnknown', dotClass: 'bg-status-unknown', Icon: HelpCircle },
 };
 
 const sizeConfig = {
@@ -35,13 +38,16 @@ export function StatusIndicator({
   showIcon = false,
   size = 'md',
   className,
+  label,
 }: StatusIndicatorProps) {
-  const config = statusConfig[status];
+  const t = useT();
+  const config = statusConfig[status] ?? statusConfig.unknown;
+  const text = label ?? t(config.labelKey);
   const sizing = sizeConfig[size];
   const { Icon } = config;
 
   return (
-    <span className={cn('inline-flex items-center gap-1.5', className)} role="status" aria-label={config.label}>
+    <span className={cn('inline-flex items-center gap-1.5', className)} role="img" aria-label={text}>
       {showIcon ? (
         <Icon size={sizing.icon} className={cn('shrink-0', config.dotClass.replace('bg-', 'text-'))} />
       ) : (
@@ -49,7 +55,7 @@ export function StatusIndicator({
       )}
       {showLabel && (
         <span className={cn('font-medium', sizing.text, 'text-neutral-700 dark:text-dark-text-secondary')}>
-          {config.label}
+          {text}
         </span>
       )}
     </span>

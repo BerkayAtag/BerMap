@@ -15,12 +15,13 @@ import '@xyflow/react/dist/style.css';
 import { Card } from '@/components/ui/Card';
 import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { Button } from '@/components/ui/Button';
-import { useThemeStore } from '@/stores/themeStore';
+import { ButtonLink } from '@/components/ui/ButtonLink';
+import { useThemeTokens, type ThemeTokens } from '@/hooks/useThemeTokens';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
-import { formatDateTime, getErrorMessage, toNodeStatus } from '@/lib/format';
+import { formatDateTime, formatNumber, getErrorMessage, toNodeStatus } from '@/lib/format';
 import type { GraphQueryResult, InfrastructureNode } from '@/types';
-import { Server, Database, Cpu, Layers, Search, Network, RefreshCw, PlugZap } from 'lucide-react';
+import { Server, Database, Cpu, Layers, Search, Network, RefreshCw, PlugZap, AlertTriangle } from 'lucide-react';
 
 const TYPE_GROUP_ORDER: Record<string, number> = {
   Datacenter: 0,
@@ -31,15 +32,15 @@ const TYPE_GROUP_ORDER: Record<string, number> = {
   Cluster: 2,
   ResourcePool: 3,
   Hypervisor: 3,
-  Storage: 4,
-  Datastore: 4,
-  Network: 4,
-  NetworkDevice: 4,
   Computer: 5,
   DomainController: 5,
   VirtualMachine: 6,
   PhysicalServer: 6,
   Endpoint: 7,
+  Storage: 10,
+  Datastore: 10,
+  Network: 10,
+  NetworkDevice: 10,
   Application: 8,
   Service: 8,
   Database: 8,
@@ -60,95 +61,106 @@ function nodeIcon(nodeType: string) {
 
 function buildFlowGraph(
   data: GraphQueryResult,
-  isDark: boolean,
+  tokens: ThemeTokens,
+  isVisible: (node: InfrastructureNode) => boolean,
+  selectedNodeId: string | null,
 ): { nodes: Node[]; edges: Edge[] } {
-  const nodesByType = new Map<string, InfrastructureNode[]>();
+  // Layered layout: each TYPE_GROUP_ORDER value is a horizontal band (sites
+  // and domains on top, workloads in the middle, storage/network below).
+  // Wide bands wrap into centred rows so the graph keeps a readable aspect
+  // ratio instead of one very wide strip.
+  const layers = new Map<number, InfrastructureNode[]>();
   for (const node of data.nodes) {
-    const list = nodesByType.get(node.nodeType) ?? [];
+    const layer = TYPE_GROUP_ORDER[node.nodeType] ?? 50;
+    const list = layers.get(layer) ?? [];
     list.push(node);
-    nodesByType.set(node.nodeType, list);
+    layers.set(layer, list);
   }
-
-  const groups = Array.from(nodesByType.entries()).sort(
-    (a, b) => (TYPE_GROUP_ORDER[a[0]] ?? 50) - (TYPE_GROUP_ORDER[b[0]] ?? 50) || a[0].localeCompare(b[0]),
-  );
 
   const positions = new Map<string, { x: number; y: number }>();
   const COLUMN_GAP = 230;
-  const ROW_GAP = 110;
-  const PER_GROUP_MAX_ROW = 12;
+  const ROW_GAP = 80;
+  const LAYER_GAP = 70;
+  const MAX_PER_ROW = 8;
 
-  let column = 0;
-  for (const [, nodes] of groups) {
-    nodes.slice(0, PER_GROUP_MAX_ROW).forEach((node, index) => {
-      positions.set(node.id, {
-        x: column * COLUMN_GAP,
-        y: index * ROW_GAP,
+  let y = 0;
+  for (const [, nodes] of Array.from(layers.entries()).sort((a, b) => a[0] - b[0])) {
+    const ordered = [...nodes].sort(
+      (a, b) => a.nodeType.localeCompare(b.nodeType) || a.name.localeCompare(b.name),
+    );
+    for (let start = 0; start < ordered.length; start += MAX_PER_ROW) {
+      const row = ordered.slice(start, start + MAX_PER_ROW);
+      const offset = ((MAX_PER_ROW - row.length) * COLUMN_GAP) / 2;
+      row.forEach((node, index) => {
+        positions.set(node.id, { x: offset + index * COLUMN_GAP, y });
       });
-    });
-    // keep the remaining nodes of the same group in a second sub-column
-    if (nodes.length > PER_GROUP_MAX_ROW) {
-      nodes.slice(PER_GROUP_MAX_ROW, PER_GROUP_MAX_ROW * 2).forEach((node, index) => {
-        positions.set(node.id, {
-          x: column * COLUMN_GAP + 115,
-          y: index * ROW_GAP,
-        });
-      });
+      y += ROW_GAP;
     }
-    column += 1;
+    y += LAYER_GAP;
   }
 
-  const flowNodes: Node[] = data.nodes
-    .filter((node) => positions.has(node.id))
-    .map((node) => {
-      const position = positions.get(node.id)!;
-      const borderColor =
-        node.nodeType === 'Datacenter' || node.nodeType === 'Application'
-          ? '#E30613'
-          : node.status === 'warning'
-            ? '#F59E0B'
-            : node.status === 'critical'
-              ? '#DC2626'
-              : isDark
-                ? '#4B5563'
-                : '#D1D5DB';
-      return {
-        id: node.id,
-        type: 'default',
-        position,
-        data: { label: node.name, status: node.status },
-        style: {
-          background: isDark ? '#1F2937' : '#FFF',
-          color: isDark ? '#FFF' : '#111827',
-          borderRadius: '8px',
-          border: `1px solid ${borderColor}`,
-          padding: '8px 10px',
-          fontWeight: node.nodeType === 'Datacenter' ? 'bold' : 'normal',
-          width: 200,
-          fontSize: 11,
-        },
-      } satisfies Node;
-    });
+  const flowNodes: Node[] = data.nodes.map((node) => {
+    const position = positions.get(node.id) ?? { x: 0, y: 0 };
+    const status = toNodeStatus(node.status);
+    const borderColor =
+      node.nodeType === 'Datacenter' || node.nodeType === 'Application'
+        ? tokens.brand
+        : status === 'warning'
+          ? tokens.warning
+          : status === 'critical'
+            ? tokens.critical
+            : tokens.border;
+    return {
+      id: node.id,
+      type: 'default',
+      position,
+      data: { label: node.name, status: node.status },
+      style: {
+        background: tokens.surface,
+        color: tokens.text,
+        borderRadius: '8px',
+        border: `1px solid ${borderColor}`,
+        padding: '8px 10px',
+        fontWeight: node.nodeType === 'Datacenter' ? 'bold' : 'normal',
+        width: 200,
+        fontSize: 11,
+        opacity: isVisible(node) ? 1 : 0.12,
+      },
+    } satisfies Node;
+  });
 
   const knownIds = new Set(data.nodes.map((node) => node.id));
   const flowEdges: Edge[] = data.relationships
     .filter((rel) => knownIds.has(rel.sourceNodeId) && knownIds.has(rel.targetNodeId))
-    .map((rel) => ({
-      id: rel.id,
-      source: rel.sourceNodeId,
-      target: rel.targetNodeId,
-      label: rel.relationshipType,
-      animated: rel.confidenceLevel?.toLowerCase() === 'verified',
-      style: { strokeWidth: 1 },
-      labelStyle: { fontSize: 9, fill: isDark ? '#9CA3AF' : '#6B7280' },
-    }));
+    .map((rel) => {
+      // Labelling every edge turns a real topology into an unreadable mesh;
+      // relationship names are shown only for the selected node's edges.
+      const isSelected = selectedNodeId !== null &&
+        (rel.sourceNodeId === selectedNodeId || rel.targetNodeId === selectedNodeId);
+      const dimmed = selectedNodeId !== null && !isSelected;
+      return {
+        id: rel.id,
+        source: rel.sourceNodeId,
+        target: rel.targetNodeId,
+        label: isSelected ? rel.relationshipType : undefined,
+        animated: isSelected && rel.confidenceLevel?.toLowerCase() === 'verified',
+        zIndex: isSelected ? 1 : 0,
+        style: {
+          strokeWidth: isSelected ? 2 : 1,
+          stroke: isSelected ? tokens.brand : tokens.textMuted,
+          opacity: dimmed ? 0.15 : 0.55,
+        },
+        labelStyle: { fontSize: 10, fill: tokens.text },
+        labelBgStyle: { fill: tokens.surface },
+      };
+    });
 
   return { nodes: flowNodes, edges: flowEdges };
 }
 
 export const InfrastructureMapPage: React.FC = () => {
-  const { theme } = useThemeStore();
-  const isDark = theme === 'dark';
+  const tokens = useThemeTokens();
+  const isDark = tokens.isDark;
   const locale = useLocale();
   const isTr = locale === 'tr';
 
@@ -162,15 +174,6 @@ export const InfrastructureMapPage: React.FC = () => {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [queryInput, setQueryInput] = useState('');
-
-  // Project real API data into the flow graph whenever it changes.
-  useEffect(() => {
-    const data = topologyQuery.data;
-    if (!data) return;
-    const flow = buildFlowGraph(data, isDark);
-    setNodes(flow.nodes);
-    setEdges(flow.edges);
-  }, [topologyQuery.data, isDark, setNodes, setEdges]);
 
   const searchText = queryInput.trim().toLowerCase();
 
@@ -187,21 +190,21 @@ export const InfrastructureMapPage: React.FC = () => {
     [searchText],
   );
 
+  // Project real API data into the flow graph whenever data, theme or filter change.
+  // Positions already on the canvas (including user-dragged ones) are kept by node id.
   useEffect(() => {
-    if (!searchText) {
-      setNodes((current) => current.map((node) => ({ ...node, opacity: 1 })));
-      return;
-    }
     const data = topologyQuery.data;
     if (!data) return;
-    const matching = new Set(data.nodes.filter(matchNode).map((node) => node.id));
-    setNodes((current) =>
-      current.map((node) => ({
-        ...node,
-        opacity: matching.has(node.id) ? 1 : 0.12,
-      })),
-    );
-  }, [searchText, topologyQuery.data, matchNode, setNodes]);
+    const flow = buildFlowGraph(data, tokens, matchNode, selectedNodeId);
+    setNodes((current) => {
+      const previous = new Map(current.map((node) => [node.id, node.position]));
+      return flow.nodes.map((node) => {
+        const position = previous.get(node.id);
+        return position ? { ...node, position } : node;
+      });
+    });
+    setEdges(flow.edges);
+  }, [topologyQuery.data, tokens, matchNode, selectedNodeId, setNodes, setEdges]);
 
   const nodeById = useMemo(() => {
     const map = new Map<string, InfrastructureNode>();
@@ -226,7 +229,7 @@ export const InfrastructureMapPage: React.FC = () => {
   }, []);
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4">
+    <div className="h-full min-h-[480px] flex flex-col gap-4">
       {/* Data source note: map reflects the real reconciled graph */}
       <div className="flex flex-wrap items-center justify-between gap-2 bg-white dark:bg-dark-card p-2.5 rounded-lg border border-neutral-200 dark:border-dark-border text-[11px] text-neutral-500 dark:text-neutral-400">
         <span>
@@ -238,6 +241,20 @@ export const InfrastructureMapPage: React.FC = () => {
           {isTr ? 'Keşfi yönet →' : 'Manage discovery →'}
         </Link>
       </div>
+
+      {topologyQuery.data?.isTruncated && (
+        <div
+          role="status"
+          className="flex items-start gap-2 p-2.5 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 text-[11px] text-amber-800 dark:text-amber-300"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+          <span>
+            {isTr
+              ? `Graf çok büyük; harita yalnızca ilk ${formatNumber(topologyQuery.data.nodes.length)} düğümü gösteriyor. Tam liste için Envanter sayfasını kullanın.`
+              : `The graph is too large; the map shows only the first ${formatNumber(topologyQuery.data.nodes.length)} nodes. Use the Inventory page for the full list.`}
+          </span>
+        </div>
+      )}
 
       {/* Map Control Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-dark-card p-3 rounded-lg border border-neutral-200 dark:border-dark-border">
@@ -272,15 +289,15 @@ export const InfrastructureMapPage: React.FC = () => {
           </Button>
           <span className="text-xs text-neutral-500 dark:text-neutral-400 mr-2">
             {isTr ? 'Gösterilen:' : 'Showing:'}{' '}
-            <strong>{nodes.length}</strong> {isTr ? 'düğüm,' : 'nodes,'}{' '}
-            <strong>{edges.length}</strong> {isTr ? 'bağlantı' : 'links'}
+            <strong>{formatNumber(nodes.length)}</strong> {isTr ? 'düğüm,' : 'nodes,'}{' '}
+            <strong>{formatNumber(edges.length)}</strong> {isTr ? 'bağlantı' : 'links'}
           </span>
         </div>
       </div>
 
       {/* Main Graph Canvas Area + Detail Side Panel */}
       <div className="flex-1 flex gap-4 min-h-0 relative">
-        <div className="flex-1 rounded-xl border border-neutral-200 dark:border-dark-border overflow-hidden bg-neutral-50 dark:bg-[#0E1015] relative">
+        <div className="flex-1 rounded-xl border border-neutral-200 dark:border-dark-border overflow-hidden bg-neutral-50 dark:bg-dark-bg relative">
           {topologyQuery.isLoading ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-neutral-500">
               <Network className="w-8 h-8 text-neutral-300 dark:text-neutral-600 animate-pulse" />
@@ -305,12 +322,10 @@ export const InfrastructureMapPage: React.FC = () => {
                   ? 'Altyapı grafiği, entegrasyonların gerçek keşif çalışmaları tamamlandığında oluşturulur. Yeni bir sunucu veya uygulama keşfedildiğinde buraya otomatik eklenir; manuel düğüm eklemesi gerekmez.'
                   : 'The infrastructure graph is built when real discovery runs from your integrations complete. Newly discovered servers or applications appear here automatically; no manual node creation is needed.'}
               </p>
-              <Link to="/integrations" className="mt-2">
-                <Button variant="primary" size="sm" className="gap-2 bg-brand-primary">
-                  <PlugZap className="w-4 h-4" />
-                  {isTr ? 'Keşif başlat' : 'Start discovery'}
-                </Button>
-              </Link>
+              <ButtonLink to="/integrations" variant="primary" size="sm" className="mt-2 gap-2 bg-brand-primary">
+                <PlugZap className="w-4 h-4" />
+                {isTr ? 'Keşif başlat' : 'Start discovery'}
+              </ButtonLink>
             </div>
           ) : (
             <ReactFlow
@@ -319,13 +334,15 @@ export const InfrastructureMapPage: React.FC = () => {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onNodeClick={onNodeClick}
+              colorMode={isDark ? 'dark' : 'light'}
               fitView
             >
-              <Background color={isDark ? '#343945' : '#D1D5DB'} gap={16} />
+              <Background color={tokens.border} gap={16} />
               <Controls className="!bg-white dark:!bg-dark-card !border-neutral-200 dark:!border-dark-border" />
               <MiniMap
                 className="!bg-white/80 dark:!bg-dark-card/80 !border-neutral-200 dark:!border-dark-border"
-                nodeColor={() => '#E30613'}
+                nodeColor={() => tokens.brand}
+                maskColor={isDark ? 'rgb(17 19 24 / 0.6)' : 'rgb(245 246 248 / 0.6)'}
               />
             </ReactFlow>
           )}
@@ -333,7 +350,7 @@ export const InfrastructureMapPage: React.FC = () => {
 
         {/* Selected Node Details Side Panel (real data) */}
         {selectedNode && (
-          <Card className="w-80 p-5 flex flex-col justify-between border-neutral-200 dark:border-dark-border animate-in slide-in-from-right-4 duration-200">
+          <Card className="w-80 p-5 flex flex-col justify-between border-neutral-200 dark:border-dark-border bm-slide-in-right overflow-y-auto">
             <div className="min-w-0">
               <div className="flex items-center justify-between border-b border-neutral-200 dark:border-dark-border pb-3">
                 <div className="flex items-center gap-2">
@@ -358,7 +375,7 @@ export const InfrastructureMapPage: React.FC = () => {
                 <div className="space-y-2 text-xs pt-2">
                   <div className="flex justify-between py-1 border-b border-neutral-100 dark:border-dark-border">
                     <span className="text-neutral-500">{isTr ? 'Tür:' : 'Type:'}</span>
-                    <span className="font-medium uppercase text-neutral-800 dark:text-neutral-200">
+                    <span lang="en" className="font-medium uppercase text-neutral-800 dark:text-neutral-200">
                       {selectedNode.nodeType}
                     </span>
                   </div>

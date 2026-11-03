@@ -4,65 +4,47 @@ import { useNavigate } from 'react-router-dom';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
 import { Card } from '@/components/ui/Card';
-import { Loader2, Download, FileText, Camera } from 'lucide-react';
+import { Loader2, Download, FileText, Camera, AlertTriangle } from 'lucide-react';
+import { useDashboard } from '@/hooks/useDashboard';
+import { formatDateTime, formatNumber, getErrorMessage } from '@/lib/format';
+import type { InventoryPage as InventoryResponse, SnapshotSummary } from '@/types';
 
-interface InventoryNode {
-  id: string;
-  name: string;
-  nodeType: string;
-  fqdn: string;
-  ipAddress: string | null;
-  status: string;
-  discoverySource: string;
-  sourceSystems?: string[];
-}
-
-interface InventoryResponse {
-  items: InventoryNode[];
-  totalCount: number;
-  page: number;
-  pageSize: number;
-}
-
-interface SnapshotSummary {
-  id: string;
-  name: string;
-  nodeCount: number;
-  relationshipCount: number;
-  hash: string;
-  createdAt: string;
-  snapshotVersion: number;
-  isImmutable: boolean;
-}
-
-interface DashboardSummary {
-  totalEntities: number;
-  healthyEntities: number;
-  warningEntities: number;
-  criticalEntities: number;
-}
+/** Backend clamps pageSize to 200 for /inventory/nodes. */
+const EXPORT_PAGE_SIZE = 200;
 
 export const ReportsPage: React.FC = () => {
   const locale = useLocale();
   const isTr = locale === 'tr';
   const navigate = useNavigate();
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
-  const dashboard = useQuery<DashboardSummary>({
-    queryKey: ['reports', 'dashboard'],
-    queryFn: () => api.get<DashboardSummary>('/dashboard/summary'),
-  });
+  const dashboard = useDashboard();
 
   const snapshots = useQuery<SnapshotSummary[]>({
-    queryKey: ['reports', 'snapshots'],
+    queryKey: ['snapshots', 'list'],
     queryFn: () => api.get<SnapshotSummary[]>('/snapshots'),
   });
 
   const handleExportCsv = async () => {
     setExporting(true);
+    setExportError(null);
+    setExportProgress(null);
     try {
-      const response = await api.get<InventoryResponse>('/inventory/nodes?page=1&pageSize=1000');
-      const items = response.items ?? [];
+      const items: InventoryResponse['items'] = [];
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const response = await api.get<InventoryResponse>(
+          `/inventory/nodes?page=${page}&pageSize=${EXPORT_PAGE_SIZE}`,
+        );
+        items.push(...(response.items ?? []));
+        totalPages = Math.max(1, response.totalPages ?? 1);
+        setExportProgress(`${formatNumber(items.length)} / ${formatNumber(response.totalCount)}`);
+        page += 1;
+      } while (page <= totalPages);
+
       const header = ['id', 'name', 'nodeType', 'fqdn', 'ipAddress', 'status', 'discoverySource', 'sources'];
       const rows = items.map((n) => [
         n.id,
@@ -76,8 +58,9 @@ export const ReportsPage: React.FC = () => {
       ]);
       const csv = [header, ...rows]
         .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
-        .join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        .join('\r\n');
+      // UTF-8 BOM so Excel opens Turkish characters correctly.
+      const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -86,8 +69,13 @@ export const ReportsPage: React.FC = () => {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(
+        `${isTr ? 'CSV dışa aktarımı başarısız oldu:' : 'CSV export failed:'} ${getErrorMessage(error)}`,
+      );
     } finally {
       setExporting(false);
+      setExportProgress(null);
     }
   };
 
@@ -107,19 +95,19 @@ export const ReportsPage: React.FC = () => {
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         <Card className="p-4">
           <div className="text-xs text-neutral-500">{isTr ? 'Toplam Varlık' : 'Total Entities'}</div>
-          <div className="text-2xl font-bold mt-1">{dashboard.data?.totalEntities ?? 0}</div>
+          <div className="text-2xl font-bold mt-1">{formatNumber(dashboard.data?.totalEntities)}</div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-neutral-500">{isTr ? 'Sağlıklı' : 'Healthy'}</div>
-          <div className="text-2xl font-bold mt-1 text-emerald-600">{dashboard.data?.healthyEntities ?? 0}</div>
+          <div className="text-2xl font-bold mt-1 text-emerald-600">{formatNumber(dashboard.data?.healthyEntities)}</div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-neutral-500">{isTr ? 'Uyarı' : 'Warning'}</div>
-          <div className="text-2xl font-bold mt-1 text-amber-600">{dashboard.data?.warningEntities ?? 0}</div>
+          <div className="text-2xl font-bold mt-1 text-amber-600">{formatNumber(dashboard.data?.warningEntities)}</div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-neutral-500">{isTr ? 'Kritik' : 'Critical'}</div>
-          <div className="text-2xl font-bold mt-1 text-rose-600">{dashboard.data?.criticalEntities ?? 0}</div>
+          <div className="text-2xl font-bold mt-1 text-rose-600">{formatNumber(dashboard.data?.criticalEntities)}</div>
         </Card>
       </div>
 
@@ -137,11 +125,21 @@ export const ReportsPage: React.FC = () => {
           type="button"
           onClick={() => void handleExportCsv()}
           disabled={exporting}
-          className="inline-flex items-center justify-center rounded-md font-medium transition-colors duration-150 bg-brand-primary text-white hover:bg-brand-primary-dark h-9 px-4 text-sm gap-2 disabled:opacity-50"
+          className="inline-flex items-center justify-center rounded-md font-medium transition-colors duration-150 bg-brand-primary text-white hover:bg-brand-primary-hover h-9 px-4 text-sm gap-2 disabled:opacity-50"
         >
           {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
           {isTr ? 'CSV Dışa Aktar' : 'Export CSV'}
+          {exportProgress && <span className="text-xs opacity-80">({exportProgress})</span>}
         </button>
+        {exportError && (
+          <div
+            role="alert"
+            className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300 flex items-start gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{exportError}</span>
+          </div>
+        )}
       </Card>
 
       <Card className="p-4 space-y-3">
@@ -169,7 +167,7 @@ export const ReportsPage: React.FC = () => {
               <div className="min-w-0">
                 <div className="font-medium text-sm truncate">{s.name}</div>
                 <div className="text-xs text-neutral-500">
-                  v{s.snapshotVersion} · {s.nodeCount} {isTr ? 'düğüm' : 'nodes'} · {s.relationshipCount} {isTr ? 'ilişki' : 'rels'} · {new Date(s.createdAt).toLocaleString()}
+                  v{s.snapshotVersion} · {formatNumber(s.nodeCount)} {isTr ? 'düğüm' : 'nodes'} · {formatNumber(s.relationshipCount)} {isTr ? 'ilişki' : 'rels'} · {formatDateTime(s.createdAt)}
                 </div>
               </div>
               <button

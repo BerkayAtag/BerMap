@@ -241,6 +241,20 @@ public class CollectorsController : ControllerBase
         job.WarningsJson = JsonSerializer.Serialize(batch.Warnings.Concat(ingestion.Warnings));
         job.StatisticsJson = JsonSerializer.Serialize(batch.Statistics);
 
+        if (batchComplete)
+        {
+            // Collector-fed integrations report health the same way as
+            // server-side discovery does, otherwise they stay "Inactive" forever.
+            var integration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, cancellationToken);
+            integration.Status = batch.Success && batch.Errors.Count == 0
+                ? (integration.IsEnabled ? IntegrationStatus.Active : IntegrationStatus.Inactive)
+                : IntegrationStatus.Degraded;
+            integration.LastError = batch.Errors.FirstOrDefault() ?? string.Empty;
+            integration.LastErrorAt = batch.Errors.Count > 0 ? DateTime.UtcNow : null;
+            integration.LastJobId = job.Id;
+            integration.UpdatedAt = DateTime.UtcNow;
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -268,11 +282,29 @@ public class CollectorsController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Hostname))
             return BadRequest(new { message = "Collector name and hostname are required." });
 
+        // A collector that lost its persisted id re-enrolls under the same
+        // name and host; reuse that row instead of listing it twice.
+        var name = request.Name.Trim();
+        var hostname = request.Hostname.Trim();
+        var existing = await _context.Collectors
+            .FirstOrDefaultAsync(c => c.Name == name && c.Hostname == hostname, cancellationToken);
+        if (existing != null)
+        {
+            existing.IPAddress = request.IpAddress?.Trim() ?? existing.IPAddress;
+            existing.Version = string.IsNullOrWhiteSpace(request.Version) ? existing.Version : request.Version.Trim();
+            existing.SupportedAdaptersJson = JsonSerializer.Serialize(request.SupportedAdapters ?? new List<string>());
+            existing.LastHeartbeatAt = DateTime.UtcNow;
+            existing.Status = CollectorStatus.Online;
+            existing.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync(cancellationToken);
+            return Ok(new { registered = true, collectorId = existing.Id });
+        }
+
         var registration = new Collector
         {
             Id = Guid.NewGuid(),
-            Name = request.Name.Trim(),
-            Hostname = request.Hostname.Trim(),
+            Name = name,
+            Hostname = hostname,
             IPAddress = request.IpAddress?.Trim() ?? string.Empty,
             Version = string.IsNullOrWhiteSpace(request.Version) ? "1.0.0" : request.Version.Trim(),
             SupportedAdaptersJson = JsonSerializer.Serialize(request.SupportedAdapters ?? new List<string>()),

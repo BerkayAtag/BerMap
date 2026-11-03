@@ -216,6 +216,85 @@ public class SimulationEngineTests
             "Datastore outage has no compute failover; headroom alone cannot serve storage.");
         Assert.InRange(result.RiskScore, 0, 100);
     }
+
+    [Fact]
+    public async Task HostFailure_PathsFollowEdgeDirection_AndWorkloadsDoNotTakeDownTheirNetwork()
+    {
+        var hostId = Guid.NewGuid();
+        var vmId = Guid.NewGuid();
+        var appId = Guid.NewGuid();
+        var networkId = Guid.NewGuid();
+        var graph = new GraphQueryResultDto
+        {
+            Nodes = new List<InfrastructureNodeDto>
+            {
+                new() { Id = hostId, Name = "esx01", NodeType = "Hypervisor" },
+                new() { Id = vmId, Name = "mq-broker-01", NodeType = "VirtualMachine" },
+                new() { Id = appId, Name = "app-core-02", NodeType = "VirtualMachine" },
+                new() { Id = networkId, Name = "VLAN-204-App", NodeType = "Network" },
+            },
+            Relationships = new List<InfrastructureRelationshipDto>
+            {
+                new() { Id = Guid.NewGuid(), SourceNodeId = vmId, TargetNodeId = hostId, RelationshipType = "HostedOn" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = appId, TargetNodeId = vmId, RelationshipType = "DependsOn" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = vmId, TargetNodeId = networkId, RelationshipType = "ConnectedTo" },
+            },
+        };
+
+        var result = await new SimulationEngine(new StaticGraphService(graph)).RunSimulationAsync(new SimulationRunRequest
+        {
+            TargetNodeId = hostId,
+            ScenarioType = "host_failure",
+        });
+
+        var probable = Assert.Single(result.ProbableImpacts);
+        Assert.Equal("app-core-02", probable.Name);
+        Assert.Equal("app-core-02 -> [DependsOn] -> mq-broker-01", probable.DependencyPath);
+        Assert.DoesNotContain(result.ProbableImpacts.Concat(result.PossibleImpacts), i => i.Name == "VLAN-204-App");
+    }
+
+    [Fact]
+    public async Task WorkloadTarget_ImpactsItsDependents_NotItsHostOrDatastore()
+    {
+        var hostId = Guid.NewGuid();
+        var datastoreId = Guid.NewGuid();
+        var dbId = Guid.NewGuid();
+        var appId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+        var graph = new GraphQueryResultDto
+        {
+            Nodes = new List<InfrastructureNodeDto>
+            {
+                new() { Id = hostId, Name = "esx02", NodeType = "Hypervisor" },
+                new() { Id = datastoreId, Name = "DS-01", NodeType = "Datastore" },
+                new() { Id = dbId, Name = "sql-core-01", NodeType = "VirtualMachine" },
+                new() { Id = appId, Name = "app-core-01", NodeType = "VirtualMachine" },
+                new() { Id = webId, Name = "web-portal-01", NodeType = "VirtualMachine" },
+            },
+            Relationships = new List<InfrastructureRelationshipDto>
+            {
+                new() { Id = Guid.NewGuid(), SourceNodeId = dbId, TargetNodeId = hostId, RelationshipType = "HostedOn" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = dbId, TargetNodeId = datastoreId, RelationshipType = "UsesStorage" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = appId, TargetNodeId = dbId, RelationshipType = "UsesDatabase" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = webId, TargetNodeId = appId, RelationshipType = "DependsOn" },
+            },
+        };
+
+        foreach (var scenario in new[] { "host_failure", "datastore_failure" })
+        {
+            var result = await new SimulationEngine(new StaticGraphService(graph)).RunSimulationAsync(new SimulationRunRequest
+            {
+                TargetNodeId = dbId,
+                ScenarioType = scenario,
+            });
+
+            var confirmed = Assert.Single(result.ConfirmedImpacts);
+            Assert.Equal("app-core-01", confirmed.Name);
+            Assert.Equal("web-portal-01", Assert.Single(result.ProbableImpacts).Name);
+            Assert.DoesNotContain(result.ConfirmedImpacts.Concat(result.ProbableImpacts).Concat(result.PossibleImpacts),
+                i => i.Name is "esx02" or "DS-01");
+        }
+    }
 }
 
 /// <summary>Serves a fixed real graph (no fabricated values).</summary>

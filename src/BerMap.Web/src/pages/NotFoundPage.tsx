@@ -1,6 +1,5 @@
 import React from 'react';
-import { Button } from '@/components/ui/Button';
-import { Link } from 'react-router-dom';
+import { ButtonLink } from '@/components/ui/ButtonLink';
 import { ArrowLeft } from 'lucide-react';
 import { useLocale } from '@/lib/i18n';
 
@@ -21,12 +20,10 @@ export const NotFoundPage: React.FC = () => {
           ? 'Aradığınız modül veya görünüm sistemde mevcut değil ya da erişim izniniz bulunmuyor.'
           : 'The module or view you requested does not exist or you lack access permission.'}
       </p>
-      <Link to="/" className="mt-6">
-        <Button variant="primary" size="sm" className="gap-2 bg-brand-primary">
-          <ArrowLeft className="w-4 h-4" />
-          {isTr ? 'Ana Panele Dön' : 'Return to Dashboard'}
-        </Button>
-      </Link>
+      <ButtonLink to="/" variant="primary" size="sm" className="mt-6 gap-2 bg-brand-primary">
+        <ArrowLeft className="w-4 h-4" />
+        {isTr ? 'Ana Panele Dön' : 'Return to Dashboard'}
+      </ButtonLink>
     </div>
   );
 };

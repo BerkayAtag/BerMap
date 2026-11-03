@@ -4,7 +4,6 @@ import {
   LayoutDashboard,
   Network,
   Server,
-  GitFork,
   AlertTriangle,
   Cpu,
   BarChart3,
@@ -12,36 +11,33 @@ import {
   FileText,
   PlugZap,
   Radio,
-  ShieldCheck,
   History,
   Camera,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
 import { useSidebarStore } from '@/stores/sidebarStore';
-import { useI18n } from '@/lib/i18n-runtime';
+import { useI18n, type TranslationKey } from '@/lib/i18n-runtime';
 
 interface NavItem {
-  key: string;
+  key: TranslationKey;
   path: string;
   icon: React.ComponentType<{ className?: string }>;
-  badge?: string;
+  badge?: TranslationKey;
 }
 
 const NAV_ITEMS: NavItem[] = [
   { key: 'dashboard', path: '/', icon: LayoutDashboard },
   { key: 'infrastructureMap', path: '/map', icon: Network },
   { key: 'inventory', path: '/inventory', icon: Server },
-  { key: 'dependencies', path: '/dependencies', icon: GitFork },
   { key: 'impactAnalysis', path: '/impact', icon: AlertTriangle },
-  { key: 'berSim', path: '/simulation', icon: Cpu, badge: 'Sim' },
+  { key: 'berSim', path: '/simulation', icon: Cpu, badge: 'berSimBadge' },
   { key: 'snapshots', path: '/snapshots', icon: Camera },
   { key: 'capacityIntelligence', path: '/capacity', icon: BarChart3 },
   { key: 'eventsAlerts', path: '/events', icon: Bell },
   { key: 'reports', path: '/reports', icon: FileText },
   { key: 'integrations', path: '/integrations', icon: PlugZap },
   { key: 'collectors', path: '/collectors', icon: Radio },
-  { key: 'administration', path: '/admin', icon: ShieldCheck },
   { key: 'auditLogs', path: '/audit', icon: History },
 ];
 
@@ -70,7 +66,7 @@ export const Sidebar: React.FC = () => {
                 Ber<span className="text-brand-primary dark:text-brand-primary-dark">Map</span>
               </span>
               <span className="text-[10px] uppercase font-semibold tracking-wider text-neutral-500 dark:text-neutral-400 truncate">
-                ENTERPRISE
+                {t('enterprise')}
               </span>
             </div>
           )}
@@ -78,14 +74,15 @@ export const Sidebar: React.FC = () => {
       </div>
 
       {/* Navigation List */}
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+      <nav aria-label={t('mainNavigation')} className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
-          const label = t(item.key as any, item.key);
+          const label = t(item.key);
           return (
             <NavLink
               key={item.path}
               to={item.path}
+              end={item.path === '/'}
               title={isCollapsed ? label : undefined}
               className={({ isActive }) => `
                 group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150
@@ -114,7 +111,7 @@ export const Sidebar: React.FC = () => {
                           : 'bg-brand-primary/10 text-brand-primary dark:bg-brand-primary-dark/20 dark:text-brand-primary-dark'
                       }`}
                     >
-                      {item.badge}
+                      {t(item.badge)}
                     </span>
                   )}
                 </>

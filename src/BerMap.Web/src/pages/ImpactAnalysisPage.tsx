@@ -1,18 +1,27 @@
-import React, { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import React, { useMemo, useRef, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { ButtonLink } from '@/components/ui/ButtonLink';
 import { Loader2, Search, ShieldAlert, ShieldCheck, AlertTriangle, RefreshCw, PlugZap, Info } from 'lucide-react';
 import { api } from '@/lib/api';
 import { formatNumber, getErrorMessage } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
-import type {
-  GraphQueryResult,
-  ImpactAnalysisResult,
-  ImpactedEntity,
-  InfrastructureNode,
-} from '@/types';
+import { useT } from '@/lib/i18n-runtime';
+import { NodePicker } from '@/components/inventory/NodePicker';
+import { useInventoryNodes } from '@/hooks/useInventoryNodes';
+import type { ImpactAnalysisResult, ImpactedEntity, InventoryNode } from '@/types';
+
+const EMPTY_RESULTS: Record<ScenarioType, ImpactAnalysisResult | undefined> = {
+  host_failure: undefined,
+  datastore_outage: undefined,
+  network_cut: undefined,
+};
+
+const EMPTY_ERRORS: Record<ScenarioType, string | undefined> = {
+  host_failure: undefined,
+  datastore_outage: undefined,
+  network_cut: undefined,
+};
 
 const SCENARIO_TYPES = ['host_failure', 'datastore_outage', 'network_cut'] as const;
 type ScenarioType = (typeof SCENARIO_TYPES)[number];
@@ -20,50 +29,35 @@ type ScenarioType = (typeof SCENARIO_TYPES)[number];
 export const ImpactAnalysisPage: React.FC = () => {
   const locale = useLocale();
   const isTr = locale === 'tr';
+  const t = useT();
 
-  const [targetId, setTargetId] = useState('');
-  const [search, setSearch] = useState('');
-  const [results, setResults] = useState<Record<ScenarioType, ImpactAnalysisResult | undefined>>({
-    host_failure: undefined,
-    datastore_outage: undefined,
-    network_cut: undefined,
-  });
-  const [errors, setErrors] = useState<Record<ScenarioType, string | undefined>>({
-    host_failure: undefined,
-    datastore_outage: undefined,
-    network_cut: undefined,
-  });
+  const [target, setTarget] = useState<InventoryNode | null>(null);
+  const [results, setResults] = useState(EMPTY_RESULTS);
+  const [errors, setErrors] = useState(EMPTY_ERRORS);
   const [running, setRunning] = useState(false);
+  // Incremented on every run / target change so late responses from an older run are discarded.
+  const runIdRef = useRef(0);
 
-  const topologyQuery = useQuery<GraphQueryResult>({
-    queryKey: ['graph', 'topology'],
-    queryFn: () => api.get<GraphQueryResult>('/graph/topology?depth=3'),
-    refetchInterval: 60_000,
-  });
+  const inventoryProbe = useInventoryNodes({ page: 1, pageSize: 1 }, { refetchInterval: 60_000 });
+  const inventoryTotal = inventoryProbe.data?.totalCount ?? 0;
+  const error = inventoryProbe.isError ? getErrorMessage(inventoryProbe.error) : null;
+  const targetId = target?.id ?? '';
 
-  const nodes = topologyQuery.data?.nodes ?? [];
-  const error = topologyQuery.isError ? getErrorMessage(topologyQuery.error) : null;
-
-  const filteredNodes = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    const base = term
-      ? nodes.filter(
-          (node) =>
-            node.name.toLowerCase().includes(term) ||
-            node.fqdn.toLowerCase().includes(term) ||
-            node.nodeType.toLowerCase().includes(term),
-        )
-      : nodes;
-    return base.slice(0, 300);
-  }, [nodes, search]);
-
-  const target = nodes.find((node) => node.id === targetId) ?? null;
+  const selectTarget = (node: InventoryNode) => {
+    if (node.id === targetId) return;
+    runIdRef.current += 1;
+    setTarget(node);
+    setResults(EMPTY_RESULTS);
+    setErrors(EMPTY_ERRORS);
+    setRunning(false);
+  };
 
   const runAllScenarios = async () => {
     if (!targetId) return;
+    const runId = ++runIdRef.current;
     setRunning(true);
-    setResults({ host_failure: undefined, datastore_outage: undefined, network_cut: undefined });
-    setErrors({ host_failure: undefined, datastore_outage: undefined, network_cut: undefined });
+    setResults(EMPTY_RESULTS);
+    setErrors(EMPTY_ERRORS);
 
     const outcomes = await Promise.allSettled(
       SCENARIO_TYPES.map((scenarioType: ScenarioType) =>
@@ -74,6 +68,7 @@ export const ImpactAnalysisPage: React.FC = () => {
       ),
     );
 
+    if (runId !== runIdRef.current) return;
     setRunning(false);
     setResults({
       host_failure:
@@ -112,7 +107,7 @@ export const ImpactAnalysisPage: React.FC = () => {
               {isTr ? 'Etki Analizi — Gerçek Envanter' : 'Impact Analysis — Real Inventory'}
             </h1>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-rose-600 text-white font-bold">
-              {isTr ? 'BerSim Motoru' : 'BerSim Engine'}
+              {t('berSimEngine')}
             </span>
           </div>
           <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1 max-w-3xl">
@@ -126,10 +121,10 @@ export const ImpactAnalysisPage: React.FC = () => {
             variant="outline"
             size="sm"
             className="gap-2"
-            onClick={() => void topologyQuery.refetch()}
-            disabled={topologyQuery.isFetching}
+            onClick={() => void inventoryProbe.refetch()}
+            disabled={inventoryProbe.isFetching}
           >
-            <RefreshCw className={`w-4 h-4 ${topologyQuery.isFetching ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 ${inventoryProbe.isFetching ? 'animate-spin' : ''}`} />
             {isTr ? 'Envanteri Yenile' : 'Refresh Inventory'}
           </Button>
         </div>
@@ -142,11 +137,11 @@ export const ImpactAnalysisPage: React.FC = () => {
         </div>
       )}
 
-      {topologyQuery.isLoading ? (
+      {inventoryProbe.isLoading ? (
         <Card className="p-8 text-center text-sm text-neutral-500">
           {isTr ? 'Envanter yükleniyor...' : 'Loading inventory...'}
         </Card>
-      ) : error ? null : nodes.length === 0 ? (
+      ) : error ? null : inventoryTotal === 0 ? (
         <Card className="p-10 text-center">
           <PlugZap className="w-10 h-10 mx-auto text-neutral-300 dark:text-neutral-600" />
           <h2 className="mt-3 font-bold text-neutral-900 dark:text-white">
@@ -157,59 +152,26 @@ export const ImpactAnalysisPage: React.FC = () => {
               ? 'Etki analizi yalnızca gerçek keşif verisi üzerinde çalışır. Integrations sayfasından Active Directory veya vCenter keşfi başlatın; keşif ve uzlaştırma tamamlandığında bileşenler buraya otomatik gelir.'
               : 'Impact analysis only runs on real discovery data. Start an Active Directory or vCenter discovery from the Integrations page; components appear here automatically once discovery and reconciliation complete.'}
           </p>
-          <Link to="/integrations" className="mt-4 inline-block">
-            <Button variant="primary" size="sm" className="gap-2 bg-brand-primary">
-              <PlugZap className="w-4 h-4" />
-              {isTr ? 'Keşif başlat' : 'Start discovery'}
-            </Button>
-          </Link>
+          <ButtonLink to="/integrations" variant="primary" size="sm" className="mt-4 gap-2 bg-brand-primary">
+            <PlugZap className="w-4 h-4" />
+            {isTr ? 'Keşif başlat' : 'Start discovery'}
+          </ButtonLink>
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Target selection */}
           <Card className="p-5">
-            <label className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-neutral-500">
-              <Search className="w-4 h-4" />
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-neutral-500">
+              <Search className="w-4 h-4" aria-hidden="true" />
               {isTr ? '1. Hedef Bileşen' : '1. Target Component'}
-            </label>
-            <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-100 dark:bg-dark-border text-sm">
-              <input
-                type="text"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={isTr ? 'Ad, FQDN veya tür ara...' : 'Search name, FQDN or type...'}
-                className="bg-transparent text-sm focus:outline-none w-full text-neutral-800 dark:text-neutral-200"
-              />
             </div>
-            <div className="mt-3 max-h-96 overflow-y-auto space-y-1.5">
-              {filteredNodes.length === 0 ? (
-                <p className="text-xs text-neutral-500 py-4 text-center">
-                  {isTr ? 'Eşleşen bileşen yok.' : 'No matching components.'}
-                </p>
-              ) : (
-                filteredNodes.map((node: InfrastructureNode) => (
-                  <button
-                    key={node.id}
-                    type="button"
-                    onClick={() => setTargetId(node.id)}
-                    className={`w-full text-left p-2.5 rounded-lg border text-xs transition-all ${
-                      targetId === node.id
-                        ? 'border-brand-primary bg-brand-primary/5 dark:bg-brand-primary-dark/10 text-neutral-900 dark:text-white font-medium'
-                        : 'border-neutral-200 dark:border-dark-border text-neutral-600 dark:text-neutral-400 hover:border-neutral-300'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold truncate">{node.name}</span>
-                      <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-dark-border font-mono">
-                        {node.nodeType}
-                      </span>
-                    </div>
-                    {node.fqdn && (
-                      <div className="text-[10px] text-neutral-500 font-mono truncate mt-0.5">{node.fqdn}</div>
-                    )}
-                  </button>
-                ))
-              )}
+            <div className="mt-3">
+              <NodePicker
+                selectedId={targetId || null}
+                onSelect={selectTarget}
+                label={isTr ? 'Hedef bileşen' : 'Target component'}
+                listClassName="max-h-96"
+              />
             </div>
           </Card>
 
@@ -308,7 +270,7 @@ export const ImpactAnalysisPage: React.FC = () => {
                 return (
                   <div key={scenarioType} className="border border-neutral-200 dark:border-dark-border rounded-lg p-3 space-y-2">
                     <div className="flex items-center gap-2 text-[11px] font-bold uppercase text-neutral-500">
-                      <span className="font-mono">{scenarioType}</span>
+                      <span lang="en" className="font-mono">{scenarioType}</span>
                       {result && (
                         <span className="ml-auto text-neutral-800 dark:text-neutral-200">
                           {isTr ? 'Risk' : 'Risk'}: <strong>{result.riskScore}/100</strong>

@@ -56,6 +56,8 @@ export interface InfrastructureRelationship {
 export interface GraphQueryResult {
   nodes: InfrastructureNode[];
   relationships: InfrastructureRelationship[];
+  /** True when the server capped the graph (500 nodes); newer backends only. */
+  isTruncated?: boolean;
 }
 
 export interface InventoryNode {

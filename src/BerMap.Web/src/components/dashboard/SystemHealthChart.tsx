@@ -1,7 +1,8 @@
 import React from 'react';
 import ReactECharts from 'echarts-for-react';
-import { useThemeStore } from '@/stores/themeStore';
 import { useLocale } from '@/lib/i18n';
+import { useThemeTokens } from '@/hooks/useThemeTokens';
+import { formatNumber, formatPercent } from '@/lib/format';
 import { Card } from '@/components/ui/Card';
 
 interface HealthData {
@@ -18,8 +19,7 @@ interface SystemHealthChartProps {
 export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
   data = { healthy: 0, warning: 0, critical: 0, unknown: 0 },
 }) => {
-  const { theme } = useThemeStore();
-  const isDark = theme === 'dark';
+  const tokens = useThemeTokens();
   const locale = useLocale();
 
   const labels = {
@@ -30,7 +30,7 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
     health: locale === 'tr' ? 'Sistem Sağlığı Dağılımı' : 'System Health Distribution',
     total: locale === 'tr' ? 'Toplam' : 'Total',
     components: locale === 'tr' ? 'Bileşen' : 'Components',
-    accessibility: locale === 'tr' ? 'Erişilebilirlik' : 'Accessibility',
+    healthyShare: locale === 'tr' ? 'Sağlıklı' : 'Healthy',
   };
 
   const total = data.healthy + data.warning + data.critical + data.unknown;
@@ -39,10 +39,10 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'item',
-      backgroundColor: isDark ? '#20242D' : '#FFFFFF',
-      borderColor: isDark ? '#343945' : '#E4E6EB',
+      backgroundColor: tokens.surface,
+      borderColor: tokens.border,
       textStyle: {
-        color: isDark ? '#F5F6F8' : '#17191F',
+        color: tokens.text,
       },
       formatter: '{b}: {c} ({d}%)',
     },
@@ -50,7 +50,7 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
       bottom: '2%',
       left: 'center',
       textStyle: {
-        color: isDark ? '#AEB4C0' : '#4B5563',
+        color: tokens.textMuted,
         fontSize: 12,
       },
       itemWidth: 10,
@@ -65,7 +65,7 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
         avoidLabelOverlap: false,
         itemStyle: {
           borderRadius: 6,
-          borderColor: isDark ? '#111318' : '#FFFFFF',
+          borderColor: tokens.surface,
           borderWidth: 3,
         },
         label: {
@@ -76,15 +76,15 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
             show: true,
             fontSize: 16,
             fontWeight: 'bold',
-            color: isDark ? '#FFFFFF' : '#17191F',
+            color: tokens.text,
             formatter: '{b}\n{c}',
           },
         },
         data: [
-          { value: data.healthy, name: labels.normal, itemStyle: { color: '#10B981' } },
-          { value: data.warning, name: labels.warning, itemStyle: { color: '#F59E0B' } },
-          { value: data.critical, name: labels.critical, itemStyle: { color: '#E30613' } },
-          { value: data.unknown, name: labels.unknown, itemStyle: { color: '#6B7280' } },
+          { value: data.healthy, name: labels.normal, itemStyle: { color: tokens.healthy } },
+          { value: data.warning, name: labels.warning, itemStyle: { color: tokens.warning } },
+          { value: data.critical, name: labels.critical, itemStyle: { color: tokens.critical } },
+          { value: data.unknown, name: labels.unknown, itemStyle: { color: tokens.unknown } },
         ],
       },
     ],
@@ -97,22 +97,25 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
           {labels.health}
         </h3>
         <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-100 dark:bg-dark-border text-neutral-600 dark:text-neutral-400 font-medium">
-          {labels.total}: {total.toLocaleString()} {labels.components}
+          {labels.total}: {formatNumber(total)} {labels.components}
         </span>
       </div>
 
-      <div className="flex-1 w-full min-h-[260px] relative">
+      {/* Fixed height: the overlay label is centred on the same box ECharts
+          draws in. With a stretching container they drift apart. */}
+      <div className="w-full h-[300px] relative my-auto">
         <ReactECharts
           option={option}
+          notMerge
           style={{ height: '100%', width: '100%' }}
           opts={{ renderer: 'svg' }}
         />
-        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none pb-8">
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none pb-[30px]">
           <span className="text-2xl font-black text-neutral-900 dark:text-white">
-            {total > 0 ? `${((data.healthy / total) * 100).toFixed(1)}%` : '—'}
+            {total > 0 ? formatPercent((data.healthy / total) * 100) : '—'}
           </span>
           <span className="text-[11px] uppercase font-bold text-emerald-600 dark:text-emerald-400">
-            {labels.accessibility}
+            {labels.healthyShare}
           </span>
         </div>
       </div>

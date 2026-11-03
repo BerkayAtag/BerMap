@@ -14,7 +14,7 @@ import { KPICard } from '@/components/dashboard/KPICard';
 import { SystemHealthChart } from '@/components/dashboard/SystemHealthChart';
 import { RecentChangesTable } from '@/components/dashboard/RecentChangesTable';
 import { Button } from '@/components/ui/Button';
-import { Link } from 'react-router-dom';
+import { ButtonLink } from '@/components/ui/ButtonLink';
 import { useDashboard } from '@/hooks/useDashboard';
 import { useLocale } from '@/lib/i18n';
 
@@ -79,12 +79,10 @@ export const DashboardPage: React.FC = () => {
             <RotateCw className={`w-4 h-4 text-neutral-500 ${isFetching ? 'animate-spin' : ''}`} />
             {labels.refresh}
           </Button>
-          <Link to="/simulation">
-            <Button variant="primary" size="sm" className="gap-2 bg-brand-primary">
-              <Play className="w-4 h-4 fill-white" />
-              {labels.startSimulation}
-            </Button>
-          </Link>
+          <ButtonLink to="/simulation" variant="primary" size="sm" className="gap-2 bg-brand-primary">
+            <Play className="w-4 h-4 fill-white" />
+            {labels.startSimulation}
+          </ButtonLink>
         </div>
       </div>
 
@@ -193,11 +191,9 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        <Link to="/simulation">
-          <Button variant="primary" className="whitespace-nowrap bg-brand-primary">
-            {labels.simButton}
-          </Button>
-        </Link>
+        <ButtonLink to="/simulation" variant="primary" className="whitespace-nowrap bg-brand-primary">
+          {labels.simButton}
+        </ButtonLink>
       </div>
     </div>
   );

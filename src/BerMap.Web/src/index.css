@@ -4,7 +4,7 @@
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
 /* ===== DESIGN TOKENS ===== */
-@theme {
+@theme static {
   /* Primary Brand Colors */
   --color-brand-primary: #E30613;
   --color-brand-primary-hover: #C70511;
@@ -82,6 +82,41 @@ body {
   background-color: var(--color-neutral-100);
   color: var(--color-neutral-900);
   transition: background-color 0.2s var(--ease-smooth), color 0.2s var(--ease-smooth);
+}
+
+/* Dark theme overrides for semantic status backgrounds (used by bg-status-*-bg utilities). */
+[data-theme="dark"] {
+  --color-status-healthy-bg: rgb(16 185 129 / 0.14);
+  --color-status-warning-bg: rgb(245 158 11 / 0.14);
+  --color-status-critical-bg: rgb(239 68 68 / 0.14);
+  --color-status-unknown-bg: rgb(107 114 128 / 0.2);
+  --color-status-info-bg: rgb(59 130 246 / 0.14);
+}
+
+/* Lightweight entrance animations (replaces the tailwindcss-animate plugin classes). */
+@keyframes bm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes bm-slide-in-right {
+  from { opacity: 0; transform: translateX(1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.bm-fade-in {
+  animation: bm-fade-in 0.2s var(--ease-smooth) both;
+}
+
+.bm-slide-in-right {
+  animation: bm-slide-in-right 0.2s var(--ease-smooth) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bm-fade-in,
+  .bm-slide-in-right {
+    animation: none;
+  }
 }
 
 /* Dark theme body styles */

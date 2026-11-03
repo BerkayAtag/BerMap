@@ -2,6 +2,7 @@ import React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 import { Card } from '@/components/ui/Card';
 import { Loader2, ShieldCheck } from 'lucide-react';
 
@@ -101,7 +102,7 @@ export const AuditPage: React.FC = () => {
             <tbody>
               {(data?.items ?? []).map((a) => (
                 <tr key={a.id} className="border-b border-neutral-100 dark:border-dark-border/40">
-                  <td className="py-2 pr-3 text-xs text-neutral-500">{new Date(a.createdAt).toLocaleString()}</td>
+                  <td className="py-2 pr-3 text-xs text-neutral-500">{formatDateTime(a.createdAt)}</td>
                   <td className="py-2 pr-3">{a.username || a.userId || '—'}</td>
                   <td className="py-2 pr-3 font-medium">{a.action}</td>
                   <td className="py-2 pr-3">{a.entityType}</td>

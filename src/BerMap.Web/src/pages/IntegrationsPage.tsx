@@ -22,8 +22,11 @@ import {
 import { IntegrationWizardModal } from '@/components/integrations/IntegrationWizardModal';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/i18n';
+import { useT } from '@/lib/i18n-runtime';
+import { useCanManageIntegrations } from '@/stores/authStore';
 import {
   formatDateTime,
+  formatLatency,
   formatNumber,
   formatRelativeTime,
   getErrorMessage,
@@ -115,6 +118,8 @@ export const IntegrationsPage: React.FC = () => {
   const locale = useLocale();
   const isTr = locale === 'tr';
   const queryClient = useQueryClient();
+  const t = useT();
+  const canManage = useCanManageIntegrations();
   const [isWizardOpen, setIsWizardOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,8 +167,8 @@ export const IntegrationsPage: React.FC = () => {
           : '';
         setNotice(
           isTr
-            ? `${integration.name}: bağlantı başarılı (${result.latency}).${warningText}`
-            : `${integration.name}: connection successful (${result.latency}).${warningText}`
+            ? `${integration.name}: bağlantı başarılı (${formatLatency(result.latency)}).${warningText}`
+            : `${integration.name}: connection successful (${formatLatency(result.latency)}).${warningText}`
         );
       } else {
         setActionError(
@@ -363,7 +368,7 @@ export const IntegrationsPage: React.FC = () => {
             size="sm"
             className="gap-2"
             onClick={() => void handleBulkDiscover()}
-            disabled={isBusy || integrations.length === 0}
+            disabled={isBusy || integrations.length === 0 || !canManage}
           >
             {busyAction === 'bulk' ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -376,6 +381,8 @@ export const IntegrationsPage: React.FC = () => {
             variant="primary"
             size="sm"
             onClick={() => setIsWizardOpen(true)}
+            disabled={!canManage}
+            title={canManage ? undefined : t('noPermission')}
             className="gap-2 bg-brand-primary"
           >
             <Plus className="w-4 h-4" />
@@ -494,6 +501,7 @@ export const IntegrationsPage: React.FC = () => {
             size="sm"
             className="mt-4 gap-2 bg-brand-primary"
             onClick={() => setIsWizardOpen(true)}
+            disabled={!canManage}
           >
             <Plus className="w-4 h-4" />
             {isTr ? 'İlk Entegrasyonu Ekle' : 'Add First Integration'}
@@ -635,7 +643,7 @@ export const IntegrationsPage: React.FC = () => {
                       size="sm"
                       className="px-2"
                       onClick={() => void handleToggleEnabled(integration)}
-                      disabled={isBusy}
+                      disabled={isBusy || !canManage}
                       title={
                         integration.isEnabled
                           ? (isTr ? 'Entegrasyonu devre dışı bırak' : 'Disable integration')
@@ -655,7 +663,7 @@ export const IntegrationsPage: React.FC = () => {
                       size="sm"
                       className="px-2 text-rose-600 hover:text-rose-700 dark:text-rose-400"
                       onClick={() => void handleDelete(integration)}
-                      disabled={isBusy}
+                      disabled={isBusy || !canManage}
                       title={isTr ? 'Entegrasyonu sil' : 'Delete integration'}
                     >
                       {isDeleteBusy ? (
@@ -668,7 +676,7 @@ export const IntegrationsPage: React.FC = () => {
                       variant="outline"
                       size="sm"
                       onClick={() => void handleTest(integration)}
-                      disabled={isBusy}
+                      disabled={isBusy || !canManage}
                     >
                       {isTestBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                       {isTr ? 'Test Et' : 'Test'}
@@ -678,7 +686,7 @@ export const IntegrationsPage: React.FC = () => {
                       size="sm"
                       className="bg-brand-primary"
                       onClick={() => void handleDiscover(integration)}
-                      disabled={isBusy || !integration.isEnabled}
+                      disabled={isBusy || !integration.isEnabled || !canManage}
                     >
                       {isDiscoverBusy ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -750,8 +758,8 @@ export const IntegrationsPage: React.FC = () => {
                   <th className="pb-2">{isTr ? 'Durum' : 'Status'}</th>
                   <th className="pb-2">{isTr ? 'Aşama' : 'Phase'}</th>
                   <th className="pb-2 min-w-36">{isTr ? 'İlerleme' : 'Progress'}</th>
-                  <th className="pb-2 text-right">{isTr ? 'Varlık / İlişki' : 'Entities / Relationships'}</th>
-                  <th className="pb-2">{isTr ? 'Başlangıç' : 'Started'}</th>
+                  <th className="pb-2 pr-4 text-right">{isTr ? 'Varlık / İlişki' : 'Entities / Relationships'}</th>
+                  <th className="pb-2 pl-4">{isTr ? 'Başlangıç' : 'Started'}</th>
                   <th className="pb-2 text-right pr-1">{isTr ? 'İşlem' : 'Action'}</th>
                 </tr>
               </thead>
@@ -790,11 +798,11 @@ export const IntegrationsPage: React.FC = () => {
                         {Math.min(100, Math.max(0, job.progressPercent))}%
                       </span>
                     </td>
-                    <td className="py-2.5 text-right text-neutral-600 dark:text-neutral-300">
+                    <td className="py-2.5 pr-4 text-right tabular-nums text-neutral-600 dark:text-neutral-300">
                       {formatNumber(job.entitiesDiscovered)} /{' '}
                       {formatNumber(job.relationshipsDiscovered)}
                     </td>
-                    <td className="py-2.5 text-neutral-600 dark:text-neutral-300">
+                    <td className="py-2.5 pl-4 whitespace-nowrap text-neutral-600 dark:text-neutral-300">
                       <span title={formatDateTime(job.startedAt)}>
                         {formatRelativeTime(job.startedAt)}
                       </span>
@@ -806,7 +814,7 @@ export const IntegrationsPage: React.FC = () => {
                           size="sm"
                           className="px-2 text-rose-600 hover:text-rose-700 dark:text-rose-400"
                           onClick={() => void handleCancelJob(job)}
-                          disabled={isBusy}
+                          disabled={isBusy || !canManage}
                           title={isTr ? 'Keşif işini iptal et' : 'Cancel discovery job'}
                         >
                           {busyAction === `cancel:${job.id}` ? (

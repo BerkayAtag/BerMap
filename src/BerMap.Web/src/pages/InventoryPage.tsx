@@ -28,6 +28,10 @@ import {
   toNodeStatus,
 } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
+import { useT } from '@/lib/i18n-runtime';
+import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { useCanOperate } from '@/stores/authStore';
+import { useSearchParams } from 'react-router-dom';
 import type {
   InventoryNode,
   InventoryNodeDetail,
@@ -116,30 +120,72 @@ function FieldDisplay({ label, value, mono = false }: FieldDisplayProps) {
 export const InventoryPage: React.FC = () => {
   const locale = useLocale();
   const isTr = locale === 'tr';
+  const t = useT();
   const queryClient = useQueryClient();
+  const canOperate = useCanOperate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialQuery = searchParams.get('q') ?? '';
 
-  const [queryInput, setQueryInput] = useState('');
-  const [query, setQuery] = useState('');
+  const [queryInput, setQueryInput] = useState(initialQuery);
+  const [query, setQuery] = useState(initialQuery);
   const [nodeType, setNodeType] = useState('');
   const [status, setStatus] = useState('');
   const [needsReview, setNeedsReview] = useState(false);
   const [staleFilter, setStaleFilter] = useState<StaleFilter>('all');
   const [page, setPage] = useState(1);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(searchParams.get('node'));
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
   const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
   const [resolvingReviewId, setResolvingReviewId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Deep links from the global search (/inventory?node=<id> or ?q=<text>).
+  const linkedNodeId = searchParams.get('node');
+  const linkedQuery = searchParams.get('q');
   useEffect(() => {
-    const timer = window.setTimeout(() => setQuery(queryInput.trim()), 350);
-    return () => window.clearTimeout(timer);
-  }, [queryInput]);
+    if (linkedNodeId) setSelectedNodeId(linkedNodeId);
+    if (linkedQuery !== null) {
+      setQueryInput(linkedQuery);
+      setQuery(linkedQuery.trim());
+      setPage(1);
+    }
+    if (linkedNodeId || linkedQuery !== null) {
+      setSearchParams({}, { replace: true });
+    }
+  }, [linkedNodeId, linkedQuery, setSearchParams]);
 
+  // Debounce the search box; the page is reset in the same update so a filter
+  // change triggers exactly one request.
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = queryInput.trim();
+      if (next !== query) {
+        setQuery(next);
+        setPage(1);
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [queryInput, query]);
+
+  const changeNodeType = (value: string) => {
+    setNodeType(value);
     setPage(1);
-  }, [query, nodeType, status, needsReview, staleFilter]);
+  };
+  const changeStatus = (value: string) => {
+    setStatus(value);
+    setPage(1);
+  };
+  const changeNeedsReview = (value: boolean) => {
+    setNeedsReview(value);
+    setPage(1);
+  };
+  const changeStaleFilter = (value: StaleFilter) => {
+    setStaleFilter(value);
+    setPage(1);
+  };
+
+  useEscapeKey(selectedNodeId !== null, () => setSelectedNodeId(null));
 
   const parameters = new URLSearchParams({
     page: String(page),
@@ -315,7 +361,7 @@ export const InventoryPage: React.FC = () => {
               {isTr ? 'Altyapı Envanteri & Uzlaştırma' : 'Infrastructure Inventory & Reconciliation'}
             </h1>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-brand-primary/10 text-brand-primary dark:text-brand-primary-dark font-bold">
-              Multi-Source Reconciled
+              {t('multiSourceReconciled')}
             </span>
           </div>
           <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
@@ -416,7 +462,7 @@ export const InventoryPage: React.FC = () => {
       <div className="flex flex-wrap items-center gap-2 border-b border-neutral-200 dark:border-dark-border pb-3">
         <button
           type="button"
-          onClick={() => setNeedsReview(false)}
+          onClick={() => changeNeedsReview(false)}
           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
             needsReview
               ? 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'
@@ -427,7 +473,7 @@ export const InventoryPage: React.FC = () => {
         </button>
         <button
           type="button"
-          onClick={() => setNeedsReview(true)}
+          onClick={() => changeNeedsReview(true)}
           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
             needsReview
               ? 'bg-brand-primary text-white shadow-xs'
@@ -479,7 +525,7 @@ export const InventoryPage: React.FC = () => {
             <span className="sr-only">{isTr ? 'Varlık türü' : 'Entity type'}</span>
             <select
               value={nodeType}
-              onChange={(event) => setNodeType(event.target.value)}
+              onChange={(event) => changeNodeType(event.target.value)}
               className="h-9 rounded-lg border border-neutral-300 dark:border-dark-border bg-white dark:bg-dark-card px-3 text-sm text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
             >
               {NODE_TYPE_OPTIONS.map((option) => (
@@ -494,7 +540,7 @@ export const InventoryPage: React.FC = () => {
             <span className="sr-only">{isTr ? 'Durum' : 'Status'}</span>
             <select
               value={status}
-              onChange={(event) => setStatus(event.target.value)}
+              onChange={(event) => changeStatus(event.target.value)}
               className="h-9 rounded-lg border border-neutral-300 dark:border-dark-border bg-white dark:bg-dark-card px-3 text-sm text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
             >
               <option value="">{isTr ? 'Tüm durumlar' : 'All statuses'}</option>
@@ -509,7 +555,7 @@ export const InventoryPage: React.FC = () => {
             <span className="sr-only">{isTr ? 'Bayatlık' : 'Staleness'}</span>
             <select
               value={staleFilter}
-              onChange={(event) => setStaleFilter(event.target.value as StaleFilter)}
+              onChange={(event) => changeStaleFilter(event.target.value as StaleFilter)}
               className="h-9 rounded-lg border border-neutral-300 dark:border-dark-border bg-white dark:bg-dark-card px-3 text-sm text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
             >
               <option value="all">{isTr ? 'Tüm kayıtlar' : 'All records'}</option>
@@ -703,7 +749,7 @@ export const InventoryPage: React.FC = () => {
                 {isTr ? 'Önceki' : 'Previous'}
               </Button>
               <span className="text-xs text-neutral-500">
-                {isTr ? 'Sayfa' : 'Page'} {data.page} / {data.totalPages}
+                {isTr ? 'Sayfa' : 'Page'} {data.page} / {Math.max(1, data.totalPages)}
               </span>
               <Button
                 variant="outline"
@@ -1028,7 +1074,11 @@ export const InventoryPage: React.FC = () => {
                                 <p className="text-[11px] text-neutral-500">{review.candidateSummary}</p>
                               )}
 
-                              {review.status === 'Pending' ? (
+                              {review.status === 'Pending' && !canOperate ? (
+                                <div className="pt-2 border-t border-amber-200/70 dark:border-amber-900/60 text-[11px] text-neutral-500">
+                                  {t('noPermission')}
+                                </div>
+                              ) : review.status === 'Pending' ? (
                                 <div className="space-y-2 pt-2 border-t border-amber-200/70 dark:border-amber-900/60">
                                   {candidateIds.length > 0 && (
                                     <label className="block text-[11px] text-neutral-500">

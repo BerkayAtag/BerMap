@@ -1,7 +1,9 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { AppLayout } from '@/components/layout/AppLayout';
+import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import { queryClient } from '@/lib/queryClient';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { InfrastructureMapPage } from '@/pages/InfrastructureMapPage';
 import { InventoryPage } from '@/pages/InventoryPage';
@@ -18,15 +20,6 @@ import { ReportsPage } from '@/pages/ReportsPage';
 import { AuditPage } from '@/pages/AuditPage';
 import { useThemeStore } from '@/stores/themeStore';
 import { useLocaleStore } from '@/stores/localeStore';
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-  },
-});
 
 export const App: React.FC = () => {
   const { theme } = useThemeStore();
@@ -47,22 +40,24 @@ export const App: React.FC = () => {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
 
-          <Route path="/" element={<AppLayout />}>
-            <Route index element={<DashboardPage />} />
-            <Route path="map" element={<InfrastructureMapPage />} />
-            <Route path="inventory" element={<InventoryPage />} />
-            <Route path="dependencies" element={<InfrastructureMapPage />} />
-            <Route path="impact" element={<ImpactAnalysisPage />} />
-            <Route path="simulation" element={<SimulationStudioPage />} />
-            <Route path="snapshots" element={<SnapshotsPage />} />
-            <Route path="capacity" element={<CapacityPage />} />
-            <Route path="events" element={<EventsPage />} />
-            <Route path="reports" element={<ReportsPage />} />
-            <Route path="integrations" element={<IntegrationsPage />} />
-            <Route path="collectors" element={<CollectorsPage />} />
-            <Route path="admin" element={<IntegrationsPage />} />
-            <Route path="audit" element={<AuditPage />} />
-            <Route path="*" element={<NotFoundPage />} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/" element={<AppLayout />}>
+              <Route index element={<DashboardPage />} />
+              <Route path="map" element={<InfrastructureMapPage />} />
+              <Route path="inventory" element={<InventoryPage />} />
+              <Route path="dependencies" element={<Navigate to="/map" replace />} />
+              <Route path="impact" element={<ImpactAnalysisPage />} />
+              <Route path="simulation" element={<SimulationStudioPage />} />
+              <Route path="snapshots" element={<SnapshotsPage />} />
+              <Route path="capacity" element={<CapacityPage />} />
+              <Route path="events" element={<EventsPage />} />
+              <Route path="reports" element={<ReportsPage />} />
+              <Route path="integrations" element={<IntegrationsPage />} />
+              <Route path="collectors" element={<CollectorsPage />} />
+              <Route path="admin" element={<Navigate to="/integrations" replace />} />
+              <Route path="audit" element={<AuditPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </Route>
           </Route>
         </Routes>
       </BrowserRouter>

@@ -1,19 +1,50 @@
 import type { NodeStatus } from '@/types';
+import { useLocaleStore, type Locale } from '@/stores/localeStore';
 
-const dateTimeFormatter = new Intl.DateTimeFormat('tr-TR', {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-});
+/*
+ * Formatting helpers read the active locale from the locale store at call time.
+ * Components that render formatted values subscribe to the locale (useLocale),
+ * so they re-render — and re-format — when the language changes.
+ */
 
-const relativeTimeFormatter = new Intl.RelativeTimeFormat('tr', {
-  numeric: 'auto',
-});
+const INTL_LOCALES: Record<Locale, string> = { tr: 'tr-TR', en: 'en-US' };
+
+function currentLocale(): Locale {
+  return useLocaleStore.getState().locale;
+}
+
+function intlLocale(): string {
+  return INTL_LOCALES[currentLocale()];
+}
+
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+const relativeTimeFormatters = new Map<string, Intl.RelativeTimeFormat>();
+
+function getDateTimeFormatter(): Intl.DateTimeFormat {
+  const key = intlLocale();
+  let formatter = dateTimeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(key, { dateStyle: 'medium', timeStyle: 'short' });
+    dateTimeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
+function getRelativeTimeFormatter(): Intl.RelativeTimeFormat {
+  const key = intlLocale();
+  let formatter = relativeTimeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.RelativeTimeFormat(key, { numeric: 'auto' });
+    relativeTimeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
 
 export function formatDateTime(value?: string | null): string {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  return dateTimeFormatter.format(date);
+  return getDateTimeFormatter().format(date);
 }
 
 export function formatRelativeTime(value?: string | null): string {
@@ -21,31 +52,68 @@ export function formatRelativeTime(value?: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
 
+  const formatter = getRelativeTimeFormatter();
   const seconds = Math.round((date.getTime() - Date.now()) / 1000);
   const absolute = Math.abs(seconds);
 
-  if (absolute < 60) return relativeTimeFormatter.format(seconds, 'second');
-  if (absolute < 3_600) return relativeTimeFormatter.format(Math.round(seconds / 60), 'minute');
-  if (absolute < 86_400) return relativeTimeFormatter.format(Math.round(seconds / 3_600), 'hour');
-  return relativeTimeFormatter.format(Math.round(seconds / 86_400), 'day');
+  if (absolute < 60) return formatter.format(seconds, 'second');
+  if (absolute < 3_600) return formatter.format(Math.round(seconds / 60), 'minute');
+  if (absolute < 86_400) return formatter.format(Math.round(seconds / 3_600), 'hour');
+  return formatter.format(Math.round(seconds / 86_400), 'day');
 }
 
 export function formatNumber(value?: number | null): string {
-  return (value ?? 0).toLocaleString('tr-TR');
+  return (value ?? 0).toLocaleString(intlLocale());
 }
+
+const DURATION_UNITS: Record<Locale, { ms: string; s: string; min: string }> = {
+  tr: { ms: 'ms', s: 'sn', min: 'dk' },
+  en: { ms: 'ms', s: 's', min: 'min' },
+};
 
 export function formatDuration(durationMs?: number | null): string {
   if (durationMs == null || durationMs < 0) return '—';
-  if (durationMs < 1_000) return `${durationMs} ms`;
+  const units = DURATION_UNITS[currentLocale()];
+  if (durationMs < 1_000) return `${Math.round(durationMs)} ${units.ms}`;
   const seconds = Math.round(durationMs / 1_000);
-  if (seconds < 60) return `${seconds} sn`;
+  if (seconds < 60) return `${seconds} ${units.s}`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
-  return `${minutes} dk ${remainingSeconds} sn`;
+  return `${minutes} ${units.min} ${remainingSeconds} ${units.s}`;
+}
+
+/**
+ * Parses a .NET TimeSpan string ("00:00:00.1234567" or "1.02:03:04.5") into milliseconds.
+ * Returns null when the value cannot be parsed.
+ */
+export function parseTimeSpanMs(value?: string | number | null): number | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const match = /^(-)?(?:(\d+)\.)?(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  const [, negative, days, hours, minutes, secs, fraction] = match;
+  const totalSeconds =
+    Number(days ?? 0) * 86_400 + Number(hours) * 3_600 + Number(minutes) * 60 + Number(secs);
+  const fractionMs = fraction ? Number(`0.${fraction}`) * 1_000 : 0;
+  const total = totalSeconds * 1_000 + fractionMs;
+  return negative ? -total : total;
+}
+
+/** Formats a TimeSpan latency string as milliseconds, e.g. "123 ms". */
+export function formatLatency(value?: string | number | null): string {
+  const ms = parseTimeSpanMs(value);
+  if (ms == null || ms < 0) return '—';
+  if (ms < 10_000) {
+    return `${ms.toLocaleString(intlLocale(), { maximumFractionDigits: ms < 10 ? 1 : 0 })} ms`;
+  }
+  return formatDuration(ms);
 }
 
 export function formatPercent(value?: number | null): string {
-  return `${(value ?? 0).toLocaleString('tr-TR', { maximumFractionDigits: 1 })}%`;
+  return `${(value ?? 0).toLocaleString(intlLocale(), { maximumFractionDigits: 1 })}%`;
 }
 
 export function getErrorMessage(error: unknown): string {
@@ -55,7 +123,9 @@ export function getErrorMessage(error: unknown): string {
       return message;
     }
   }
-  return 'Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.';
+  return currentLocale() === 'tr'
+    ? 'Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.'
+    : 'An unexpected error occurred. Please try again.';
 }
 
 export function toNodeStatus(status: string): NodeStatus {

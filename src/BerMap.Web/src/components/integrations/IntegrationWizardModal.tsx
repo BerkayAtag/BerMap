@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -116,6 +116,10 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [startDiscovery, setStartDiscovery] = useState(true);
+  const [created, setCreated] = useState<Integration | null>(null);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const titleId = useId();
+  const isActiveDirectory = form.adapterType === 'ActiveDirectory';
 
   const { data: adapters = [], isLoading: adaptersLoading } = useQuery<AdapterDescriptor[]>({
     queryKey: ['integrations', 'adapters'],
@@ -132,8 +136,19 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
       setError(null);
       setIsSaving(false);
       setIsTesting(false);
+      setCreated(null);
+      setDiscoveryError(null);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !isSaving) onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, isSaving, onClose]);
 
   const selectedAdapter = useMemo(
     () => adapters.find((a) => a.adapterType === form.adapterType),
@@ -166,7 +181,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     if (!form.server.trim()) return isTr ? 'Sunucu adresi zorunludur.' : 'Server address is required.';
     if (!form.username.trim()) return isTr ? 'Salt-okunur servis hesabı zorunludur.' : 'A read-only service account is required.';
     if (!form.secret.trim()) return isTr ? 'Parola / secret zorunludur.' : 'Password / secret is required.';
-    if (!form.useSsl && !form.useStartTls && !form.allowPlaintext) {
+    if (form.adapterType === 'ActiveDirectory' && !form.useSsl && !form.useStartTls && !form.allowPlaintext) {
       return isTr
         ? 'LDAPS veya StartTLS seçin; düz LDAP yalnızca açık onayla kullanılabilir.'
         : 'Select LDAPS or StartTLS; plaintext LDAP requires an explicit confirmation.';
@@ -210,9 +225,12 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
       return;
     }
 
+    if (created) return;
+
     setIsSaving(true);
     setError(null);
 
+    let createdIntegration: Integration;
     try {
       const payload: CreateIntegrationRequest = {
         name: form.name.trim(),
@@ -225,18 +243,35 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
         isEnabled: true,
       };
 
-      const created = await api.post<Integration>('/integrations', payload);
-      if (startDiscovery) {
-        await api.post(`/integrations/${created.id}/discover`, { jobType: 'Full' });
-      }
-
-      onSuccess();
-      onClose();
+      createdIntegration = await api.post<Integration>('/integrations', payload);
     } catch (requestError) {
       setError((requestError as { message?: string }).message ?? (isTr ? 'Entegrasyon kaydedilemedi.' : 'Failed to save the integration.'));
-    } finally {
       setIsSaving(false);
+      return;
     }
+
+    // The integration now exists server-side. From here on, never re-submit the create request.
+    setCreated(createdIntegration);
+    onSuccess();
+
+    if (startDiscovery) {
+      try {
+        await api.post(`/integrations/${createdIntegration.id}/discover`, { jobType: 'Full' });
+      } catch (requestError) {
+        const message = (requestError as { message?: string }).message;
+        setDiscoveryError(
+          (isTr
+            ? 'Entegrasyon oluşturuldu ancak keşif başlatılamadı. Keşfi Entegrasyonlar listesinden yeniden başlatabilirsiniz.'
+            : 'The integration was created, but discovery could not be started. You can start it again from the Integrations list.') +
+            (message ? ` (${message})` : ''),
+        );
+        setIsSaving(false);
+        return;
+      }
+    }
+
+    setIsSaving(false);
+    onClose();
   };
 
   const adapterOptions = adapters.length > 0
@@ -255,20 +290,26 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
       ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs bm-fade-in"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+    >
       <Card className="w-full max-w-2xl border-neutral-200 dark:border-dark-border shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         <div className="flex items-center justify-between p-5 border-b border-neutral-200 dark:border-dark-border bg-neutral-50 dark:bg-dark-card">
           <div>
-            <h3 className="font-bold text-lg text-neutral-900 dark:text-white flex items-center gap-2">
-              isTr ? 'Yeni Altyapı Entegrasyonu Ekle' : 'Add New Infrastructure Integration'
+            <h3 id={titleId} className="font-bold text-lg text-neutral-900 dark:text-white flex items-center gap-2">
+              {isTr ? 'Yeni Altyapı Entegrasyonu Ekle' : 'Add New Infrastructure Integration'}
             </h3>
             <p className="text-xs text-neutral-500 mt-0.5">
-              isTr ? 'Gerçek, salt-okunur keşif bağlantısı tanımlayın ve doğrulayın' : 'Define and verify a real, read-only discovery connection'
+              {isTr ? 'Gerçek, salt-okunur keşif bağlantısı tanımlayın ve doğrulayın' : 'Define and verify a real, read-only discovery connection'}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
+            aria-label={isTr ? 'Kapat' : 'Close'}
             className="p-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
           >
             <X className="w-5 h-5" />
@@ -298,6 +339,24 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
         </div>
 
         <div className="p-6 flex-1 overflow-y-auto space-y-4">
+          {created && (
+            <div className="p-3 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-xs text-emerald-800 dark:text-emerald-300 flex items-start gap-2" role="status">
+              <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>
+                {isTr
+                  ? `"${created.name}" entegrasyonu oluşturuldu.`
+                  : `Integration "${created.name}" was created.`}
+              </span>
+            </div>
+          )}
+
+          {discoveryError && (
+            <div className="p-3 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2" role="alert">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{discoveryError}</span>
+            </div>
+          )}
+
           {error && (
             <div className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -308,10 +367,10 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
           {step === 1 && (
             <div className="space-y-3">
               <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                isTr ? 'Hedef Altyapı Bileşeni Seçin' : 'Select Target Infrastructure Component'
+                {isTr ? 'Hedef Altyapı Bileşeni Seçin' : 'Select Target Infrastructure Component'}
               </label>
               {adaptersLoading ? (
-                <p className="text-xs text-neutral-500">isTr ? 'Adaptörler yükleniyor...' : 'Loading adapters...'</p>
+                <p className="text-xs text-neutral-500">{isTr ? 'Adaptörler yükleniyor...' : 'Loading adapters...'}</p>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {adapterOptions.map((adapter) => (
@@ -408,18 +467,20 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <label className="flex items-center gap-2 p-2.5 rounded-lg border border-neutral-200 dark:border-dark-border">
-                  <input
-                    type="checkbox"
-                    checked={form.useSsl}
-                    onChange={(e) => {
-                      update('useSsl', e.target.checked);
-                      if (e.target.checked) update('useStartTls', false);
-                    }}
-                  />
-                  {isTr ? 'LDAPS (TLS) kullan' : 'Use LDAPS (TLS)'}
-                </label>
-                {form.adapterType === 'ActiveDirectory' && (
+                {isActiveDirectory && (
+                  <label className="flex items-center gap-2 p-2.5 rounded-lg border border-neutral-200 dark:border-dark-border">
+                    <input
+                      type="checkbox"
+                      checked={form.useSsl}
+                      onChange={(e) => {
+                        update('useSsl', e.target.checked);
+                        if (e.target.checked) update('useStartTls', false);
+                      }}
+                    />
+                    {isTr ? 'LDAPS (TLS) kullan' : 'Use LDAPS (TLS)'}
+                  </label>
+                )}
+                {isActiveDirectory && (
                   <label className="flex items-center gap-2 p-2.5 rounded-lg border border-neutral-200 dark:border-dark-border">
                     <input
                       type="checkbox"
@@ -440,7 +501,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                   />
                   {isTr ? 'Sertifika doğrulamasını devre dışı bırak' : 'Disable certificate validation'}
                 </label>
-                {form.adapterType === 'ActiveDirectory' && (
+                {isActiveDirectory && (
                   <label className="flex items-center gap-2 p-2.5 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50/50 dark:bg-rose-950/20">
                     <input
                       type="checkbox"
@@ -570,6 +631,8 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                   <span className="font-medium text-neutral-800 dark:text-neutral-200">
                     {form.allowUntrustedCertificate
                       ? (isTr ? 'Sertifika doğrulaması kapalı' : 'Certificate validation off')
+                      : !isActiveDirectory
+                      ? (isTr ? 'HTTPS / sıkı doğrulama' : 'HTTPS / strict validation')
                       : form.useSsl
                       ? (isTr ? 'LDAPS / sıkı doğrulama' : 'LDAPS / strict validation')
                       : form.useStartTls
@@ -638,14 +701,18 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
 
         <div className="flex items-center justify-between p-4 border-t border-neutral-200 dark:border-dark-border bg-neutral-50 dark:bg-dark-card">
           {step > 1 ? (
-            <Button variant="outline" size="sm" onClick={() => setStep((s) => s - 1)} disabled={isSaving}>
+            <Button variant="outline" size="sm" onClick={() => setStep((s) => s - 1)} disabled={isSaving || created !== null}>
               {isTr ? 'Geri' : 'Back'}
             </Button>
           ) : (
             <div />
           )}
 
-          {step < 4 ? (
+          {created ? (
+            <Button variant="primary" size="sm" onClick={onClose} disabled={isSaving} className="bg-brand-primary">
+              {isTr ? 'Kapat' : 'Close'}
+            </Button>
+          ) : step < 4 ? (
             <Button
               variant="primary"
               size="sm"

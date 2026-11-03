@@ -2,6 +2,7 @@ import React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 import { Card } from '@/components/ui/Card';
 import { Loader2, AlertTriangle } from 'lucide-react';
 
@@ -129,7 +130,7 @@ export const EventsPage: React.FC = () => {
                   <td className="py-2 pr-3">{c.source}</td>
                   <td className={`py-2 pr-3 ${statusColor(c.status)}`}>{c.status}</td>
                   <td className="py-2 pr-3 text-xs text-neutral-500">
-                    {new Date(c.timestamp).toLocaleString()}
+                    {formatDateTime(c.timestamp)}
                   </td>
                 </tr>
               ))}

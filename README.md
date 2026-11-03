@@ -1,7 +1,9 @@
 # BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform
 
 > **"Discover. Map. Analyze. Simulate. Predict."**  
-> *Production-Grade | Fully On-Premises | Air-Gapped | Enterprise-Ready*
+> *Fully On-Premises | Air-Gapped | Preview (0.1)*
+
+**Product page:** https://berkayatag.github.io/BerMap/
 
 ---
 
@@ -28,7 +30,7 @@ BerMap automatically connects to enterprise infrastructure systems (Active Direc
 - **Backend**: .NET 10 LTS, C# 13, ASP.NET Core Web API, Entity Framework Core 10, Npgsql
 - **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, React Flow / XYFlow, TanStack Query, Zustand, ECharts, Lucide Icons
 - **Database**: PostgreSQL 16+ with UUIDs, JSONB, and Recursive CTEs
-- **Security**: PBKDF2/Argon2 password hashing, JWT bearer tokens, Granular RBAC, Windows DPAPI / Linux Keyring credential encryption, mTLS for collectors
+- **Security**: PBKDF2-SHA256 password hashing, HMAC-signed bearer tokens, role-based authorization, AES-256-GCM credential vault, enrollment-token authenticated collectors (see [SECURITY.md](SECURITY.md))
 
 ---
 
@@ -54,10 +56,11 @@ BerMap/
 │   └── BerMap.Tests.Integration/# Integration tests with PostgreSQL
 ├── docs/
 │   ├── architecture/            # 14 technical architecture specifications
-│   └── adr/                     # Architecture Decision Records (ADR-001 to ADR-004)
+│   └── adr/                     # Architecture Decision Records (ADR-001 to ADR-005)
+├── site/                        # Product page published to GitHub Pages
 ├── README.md
 ├── CONTRIBUTING.md
-└── LICENSE
+└── SECURITY.md
 ```
 
 ---
@@ -65,24 +68,39 @@ BerMap/
 ## 5. Quick Start (Development)
 
 ### Prerequisites
-- .NET 10 (or .NET 9) SDK
+- .NET 10 SDK
 - Node.js 20+ and npm 10+
-- PostgreSQL 16+ instance running locally
+- PostgreSQL 16+ (a local instance or `docker run -d -p 5432:5432 -e POSTGRES_USER=bermap_dev -e POSTGRES_PASSWORD=bermap_dev -e POSTGRES_DB=bermap_dev postgres:17-alpine`)
 
-### Running Backend API
+### Running the backend API
 ```bash
 cd src/BerMap.Api
-dotnet run
+dotnet run --launch-profile http
 ```
-API runs on `https://localhost:5001` with Swagger available at `/swagger`.
+- The API listens on `http://localhost:5294` and uses the `bermap_dev` connection string from `appsettings.Development.json`.
+- On first start it applies the EF Core migrations (`BerMap:Database:ApplyMigrationsOnStartup`), creates the built-in roles and a local administrator `admin`.
+- Set `BerMap:Bootstrap:AdminPassword` to choose the password; otherwise a random one is written to `initial-admin-password.txt` in the credential vault directory (`./.bermap-vault` in development). Delete that file after the first sign-in.
+- Health probes: `/healthz/live`, `/healthz/ready` (fails while migrations are pending).
 
-### Running Frontend Web Console
+### Running the web console
 ```bash
 cd src/BerMap.Web
 npm install
 npm run dev
 ```
-Console runs on `http://localhost:3000`.
+The console runs on `http://localhost:3000` and proxies `/api` to `BERMAP_API_URL` (default `http://localhost:5294`).
+
+### Tests
+```bash
+dotnet test BerMap.slnx
+cd src/BerMap.Web && npm run lint && npm run build
+```
+The PostgreSQL integration tests run when `BERMAP_TEST_CONNECTION_STRING` points at a server where the user may create databases; otherwise they are skipped.
+
+### Known limitations of this preview
+- Scheduled (cron) discovery is stored but not executed; start discovery from the Integrations page.
+- Simulations always run against the live graph, not a snapshot.
+- The collector enrolls, heartbeats and forwards queued batches, but does not run adapters itself yet.
 
 ---
 
