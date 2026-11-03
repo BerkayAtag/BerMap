@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace BerMap.Api.Health;

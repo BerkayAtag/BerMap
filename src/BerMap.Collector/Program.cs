@@ -1,20 +1,29 @@
 using System;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using BerMap.Collector;
 using BerMap.Collector.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Register Offline Buffer Queue
-builder.Services.AddSingleton<IOfflineQueue, LocalBufferQueue>();
+var collectorOptions = CollectorOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(collectorOptions);
 
-// Register HTTP Client for BerMap Server (outbound-only)
+// Register Offline Buffer Queue (under the writable collector data directory)
+builder.Services.AddSingleton<IOfflineQueue>(sp => new LocalBufferQueue(
+    collectorOptions.OfflineQueueDirectory,
+    collectorOptions.QueueMaxDiskMb,
+    sp.GetRequiredService<ILogger<LocalBufferQueue>>()));
+
+// Register HTTP Client for BerMap Server (outbound-only). The enrollment token
+// authenticates every collector call (register, heartbeat, submit-batch).
 builder.Services.AddHttpClient<ICollectorClient, CollectorClient>(client =>
 {
-    var serverUrl = builder.Configuration["BerMap:ServerUrl"] ?? "https://localhost:5001";
-    client.BaseAddress = new Uri(serverUrl);
+    client.BaseAddress = new Uri(collectorOptions.ServerUrl);
     client.Timeout = TimeSpan.FromSeconds(15);
+    if (!string.IsNullOrWhiteSpace(collectorOptions.EnrollmentToken))
+        client.DefaultRequestHeaders.TryAddWithoutValidation(CollectorOptions.EnrollmentTokenHeader, collectorOptions.EnrollmentToken);
 });
 
 // Register Background Worker

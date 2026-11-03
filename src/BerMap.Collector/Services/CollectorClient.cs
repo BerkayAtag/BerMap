@@ -1,7 +1,13 @@
 using System;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,143 +18,411 @@ namespace BerMap.Collector.Services;
 
 public interface ICollectorClient
 {
+    bool IsRegistered { get; }
+
+    /// <summary>Loads the persisted collector id or registers with the server. Returns false if not registered.</summary>
+    Task<bool> EnsureRegisteredAsync(CancellationToken cancellationToken = default);
+
     Task<bool> SendHeartbeatAsync(CancellationToken cancellationToken = default);
-    Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, CancellationToken cancellationToken = default);
-    Task DrainOfflineQueueAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a batch, or buffers it in the offline queue when the server is unreachable or a backlog
+    /// exists (to preserve ordering). <paramref name="final"/> marks the batch that completes a full snapshot.
+    /// </summary>
+    Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? jobId = null, bool final = false, CancellationToken cancellationToken = default);
+
+    /// <summary>Delivers buffered batches in order. Returns false when a delivery failed and should be retried later.</summary>
+    Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>Offline queue payload: the batch plus the submit-batch query parameters.</summary>
+public sealed class QueuedBatch
+{
+    public DiscoveryResult Batch { get; set; } = new();
+    public Guid? JobId { get; set; }
+    public bool Final { get; set; }
 }
 
 public class CollectorClient : ICollectorClient
 {
+    public const string BatchQueue = "discovery_batches";
+
     private readonly HttpClient _httpClient;
     private readonly IOfflineQueue _offlineQueue;
     private readonly ILogger<CollectorClient> _logger;
-    private readonly Guid _collectorId;
+    private readonly CollectorOptions _options;
     private readonly string _hostname;
+    private readonly string _version;
+    private readonly SemaphoreSlim _registrationLock = new(1, 1);
+    private Guid? _collectorId;
+
+    // CPU sampling state: process CPU time and wall clock at the previous heartbeat.
+    private TimeSpan? _lastCpuTime;
+    private long _lastCpuSampleTimestamp;
+
+    private enum DeliveryOutcome { Accepted, Transient, Rejected }
 
     public CollectorClient(
         HttpClient httpClient,
         IOfflineQueue offlineQueue,
         ILogger<CollectorClient> logger,
-        Guid? collectorId = null)
+        CollectorOptions options)
     {
         _httpClient = httpClient;
         _offlineQueue = offlineQueue;
         _logger = logger;
-        _collectorId = collectorId ?? Guid.Parse("99999999-9999-9999-9999-999999999999");
+        _options = options;
         _hostname = Environment.MachineName;
+        _version = typeof(CollectorClient).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0]
+            ?? "1.0.0";
+        _collectorId = LoadPersistedId();
+    }
+
+    public bool IsRegistered => _collectorId.HasValue;
+
+    public async Task<bool> EnsureRegisteredAsync(CancellationToken cancellationToken = default)
+    {
+        if (_collectorId.HasValue)
+            return true;
+
+        await _registrationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_collectorId.HasValue)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(_options.EnrollmentToken))
+            {
+                _logger.LogError("BerMap:Collector:EnrollmentToken is not configured; the collector cannot register.");
+                return false;
+            }
+
+            var request = new
+            {
+                name = _options.Name,
+                hostname = _hostname,
+                ipAddress = GetPrimaryIpAddress(),
+                version = _version,
+                supportedAdapters = _options.SupportedAdapters
+            };
+
+            using var response = await _httpClient.PostAsJsonAsync("/api/collectors/register", request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Collector registration returned {StatusCode}.", (int)response.StatusCode);
+                return false;
+            }
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            var root = doc.RootElement;
+            var registered = root.TryGetProperty("registered", out var r) && r.ValueKind == JsonValueKind.True;
+            if (!registered ||
+                !root.TryGetProperty("collectorId", out var idElement) ||
+                !Guid.TryParse(idElement.GetString(), out var collectorId) ||
+                collectorId == Guid.Empty)
+            {
+                _logger.LogWarning("Collector registration response did not contain a collector id.");
+                return false;
+            }
+
+            PersistId(collectorId);
+            _collectorId = collectorId;
+            _logger.LogInformation("Collector registered with id {CollectorId}.", collectorId);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Collector registration failed (server unreachable?): {Message}", ex.Message);
+            return false;
+        }
+        finally
+        {
+            _registrationLock.Release();
+        }
     }
 
     public async Task<bool> SendHeartbeatAsync(CancellationToken cancellationToken = default)
     {
+        if (_collectorId is not { } collectorId)
+            return false;
+
         var heartbeat = new CollectorHeartbeat
         {
-            CollectorId = _collectorId,
+            CollectorId = collectorId,
             Hostname = _hostname,
-            Version = "1.0.0",
+            Version = _version,
             CpuUsagePercent = GetCurrentCpuUsage(),
             MemoryUsagePercent = GetCurrentMemoryUsage(),
-            QueuedMessagesCount = _offlineQueue.GetQueueDepth("discovery_batches"),
+            QueuedMessagesCount = _offlineQueue.GetQueueDepth(BatchQueue),
             Timestamp = DateTime.UtcNow
         };
 
         try
         {
-            var response = await _httpClient.PostAsJsonAsync("/api/collectors/heartbeat", heartbeat, cancellationToken);
+            using var response = await _httpClient.PostAsJsonAsync("/api/collectors/heartbeat", heartbeat, cancellationToken);
             if (response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("Heartbeat sent successfully from {Hostname}", _hostname);
                 return true;
             }
 
-            _logger.LogWarning("Heartbeat response code: {StatusCode}", response.StatusCode);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                // The server no longer knows this id (e.g. collector deleted): register again.
+                _logger.LogWarning("Server does not recognise collector {CollectorId}; re-registering.", collectorId);
+                ForgetId();
+                return false;
+            }
+
+            _logger.LogWarning("Heartbeat response code: {StatusCode}", (int)response.StatusCode);
             return false;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Heartbeat failed (Server unreachable, operating offline): {Message}", ex.Message);
             return false;
         }
     }
 
-    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, CancellationToken cancellationToken = default)
+    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? jobId = null, bool final = false, CancellationToken cancellationToken = default)
     {
-        try
-        {
-            var response = await _httpClient.PostAsJsonAsync("/api/collectors/submit-batch", batch, cancellationToken);
-            if (response.IsSuccessStatusCode)
-            {
-                _logger.LogInformation("Discovered batch with {NodeCount} nodes submitted successfully", batch.Nodes.Count);
-                return true;
-            }
+        var queued = new QueuedBatch { Batch = batch, JobId = jobId, Final = final };
 
-            _logger.LogWarning("Batch submission returned {StatusCode}. Buffering to local offline queue.", response.StatusCode);
-            await _offlineQueue.EnqueueAsync("discovery_batches", batch, cancellationToken);
+        // Never overtake buffered batches: a later batch must not be ingested before an earlier one.
+        if (_offlineQueue.GetQueueDepth(BatchQueue) > 0)
+        {
+            await BufferAsync(queued, "older batches are still buffered");
             return false;
         }
-        catch (Exception ex)
+
+        DeliveryOutcome outcome;
+        try
         {
-            _logger.LogWarning("Network failure during batch submit ({Message}). Buffering to local offline queue.", ex.Message);
-            await _offlineQueue.EnqueueAsync("discovery_batches", batch, cancellationToken);
-            return false;
+            outcome = await PostBatchAsync(queued, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Network failure during batch submit ({Message}).", ex.Message);
+            outcome = DeliveryOutcome.Transient;
+        }
+
+        switch (outcome)
+        {
+            case DeliveryOutcome.Accepted:
+                _logger.LogInformation("Discovered batch with {NodeCount} nodes submitted successfully", batch.Nodes.Count);
+                return true;
+            case DeliveryOutcome.Rejected:
+                _logger.LogError("Server permanently rejected a discovery batch with {NodeCount} nodes; it was not buffered.", batch.Nodes.Count);
+                return false;
+            default:
+                await BufferAsync(queued, "server unavailable");
+                return false;
         }
     }
 
-    public async Task DrainOfflineQueueAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default)
     {
-        var depth = _offlineQueue.GetQueueDepth("discovery_batches");
-        if (depth == 0) return;
+        var depth = _offlineQueue.GetQueueDepth(BatchQueue);
+        if (depth == 0)
+            return true;
 
         _logger.LogInformation("Draining offline queue ({Depth} batches pending)...", depth);
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var item = await _offlineQueue.DequeueAsync<DiscoveryResult>("discovery_batches", cancellationToken);
-            if (item == null) break;
+            var item = await _offlineQueue.DequeueAsync<QueuedBatch>(BatchQueue, cancellationToken);
+            if (item == null)
+                return true;
 
+            if (item.Payload.Batch == null)
+            {
+                await _offlineQueue.DeadLetterAsync(BatchQueue, item.Id, "no batch payload", CancellationToken.None);
+                continue;
+            }
+
+            DeliveryOutcome outcome;
             try
             {
-                var response = await _httpClient.PostAsJsonAsync("/api/collectors/submit-batch", item.Payload, cancellationToken);
-                if (!response.IsSuccessStatusCode)
-                {
-                    // Re-enqueue if server rejected or is still offline
-                    await _offlineQueue.EnqueueAsync("discovery_batches", item.Payload, cancellationToken);
-                    break;
-                }
-
-                _logger.LogInformation("Successfully drained backlog batch {Id}", item.Id);
+                outcome = await PostBatchAsync(item.Payload, cancellationToken);
             }
-            catch
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // Re-enqueue and stop draining until next cycle
-                await _offlineQueue.EnqueueAsync("discovery_batches", item.Payload, cancellationToken);
-                break;
+                // Shutdown: give the lease back without counting it as a delivery failure.
+                await _offlineQueue.ReleaseAsync(BatchQueue, item.Id, countAsFailure: false, CancellationToken.None);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Backlog batch {Id} delivery failed: {Message}", item.Id, ex.Message);
+                outcome = DeliveryOutcome.Transient;
+            }
+
+            // Local bookkeeping must complete even if shutdown was requested meanwhile.
+            switch (outcome)
+            {
+                case DeliveryOutcome.Accepted:
+                    await _offlineQueue.AckAsync(BatchQueue, item.Id, CancellationToken.None);
+                    _logger.LogInformation("Successfully drained backlog batch {Id}", item.Id);
+                    break;
+                case DeliveryOutcome.Rejected:
+                    await _offlineQueue.DeadLetterAsync(BatchQueue, item.Id, "rejected by server", CancellationToken.None);
+                    _logger.LogError("Backlog batch {Id} was rejected by the server and moved to dead-letter.", item.Id);
+                    break;
+                default:
+                    var requeued = await _offlineQueue.ReleaseAsync(BatchQueue, item.Id, countAsFailure: true, CancellationToken.None);
+                    if (!requeued)
+                        _logger.LogError("Backlog batch {Id} exceeded the retry limit and was moved to dead-letter.", item.Id);
+                    return false;
             }
         }
+
+        return false;
     }
 
-    private static double GetCurrentCpuUsage()
+    private async Task<DeliveryOutcome> PostBatchAsync(QueuedBatch queued, CancellationToken cancellationToken)
+    {
+        var query = $"?final={(queued.Final ? "true" : "false")}";
+        if (queued.JobId.HasValue)
+            query += $"&jobId={queued.JobId.Value:D}";
+
+        using var response = await _httpClient.PostAsJsonAsync("/api/collectors/submit-batch" + query, queued.Batch, cancellationToken);
+        if (response.IsSuccessStatusCode)
+            return DeliveryOutcome.Accepted;
+
+        var status = (int)response.StatusCode;
+        _logger.LogWarning("Batch submission returned {StatusCode}.", status);
+
+        // 401/403 are configuration problems (token) and 408/429 are throttling: keep the batch.
+        // Any other 4xx means the server will never accept this payload.
+        if (status is >= 400 and < 500 and not (401 or 403 or 408 or 429))
+            return DeliveryOutcome.Rejected;
+        return DeliveryOutcome.Transient;
+    }
+
+    private async Task BufferAsync(QueuedBatch queued, string reason)
+    {
+        // Buffering is local bookkeeping and must not be skipped because of cancellation.
+        var accepted = await _offlineQueue.EnqueueAsync(BatchQueue, queued, CancellationToken.None);
+        if (accepted)
+            _logger.LogWarning("Discovery batch buffered to local offline queue ({Reason}).", reason);
+        else
+            _logger.LogError("Discovery batch dropped: offline queue disk quota exceeded.");
+    }
+
+    // ---------------------------------------------------------------------
+    // Identity persistence
+    // ---------------------------------------------------------------------
+
+    private Guid? LoadPersistedId()
     {
         try
         {
-            var process = Process.GetCurrentProcess();
-            return Math.Round(process.TotalProcessorTime.TotalMilliseconds / (Environment.ProcessorCount * 1000.0) % 100, 1);
+            if (File.Exists(_options.CollectorIdFile) &&
+                Guid.TryParse(File.ReadAllText(_options.CollectorIdFile).Trim(), out var id) &&
+                id != Guid.Empty)
+                return id;
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return 12.5;
+            _logger.LogWarning("Could not read collector id file {File}: {Message}", _options.CollectorIdFile, ex.Message);
+        }
+        return null;
+    }
+
+    private void PersistId(Guid id)
+    {
+        Directory.CreateDirectory(_options.DataDirectory);
+        var temp = _options.CollectorIdFile + ".tmp";
+        File.WriteAllText(temp, id.ToString("D"));
+        File.Move(temp, _options.CollectorIdFile, overwrite: true);
+    }
+
+    private void ForgetId()
+    {
+        _collectorId = null;
+        try
+        {
+            File.Delete(_options.CollectorIdFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not delete collector id file: {Message}", ex.Message);
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Host metrics
+    // ---------------------------------------------------------------------
+
+    /// <summary>Process CPU % since the previous sample (or process start), normalised to all cores.</summary>
+    private double GetCurrentCpuUsage()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            var cpuTime = process.TotalProcessorTime;
+            var now = Stopwatch.GetTimestamp();
+
+            TimeSpan cpuDelta;
+            TimeSpan wallDelta;
+            if (_lastCpuTime is { } lastCpu)
+            {
+                cpuDelta = cpuTime - lastCpu;
+                wallDelta = Stopwatch.GetElapsedTime(_lastCpuSampleTimestamp, now);
+            }
+            else
+            {
+                cpuDelta = cpuTime;
+                wallDelta = DateTime.Now - process.StartTime;
+            }
+
+            _lastCpuTime = cpuTime;
+            _lastCpuSampleTimestamp = now;
+
+            if (wallDelta <= TimeSpan.Zero)
+                return 0;
+            var percent = 100.0 * cpuDelta.TotalMilliseconds / (wallDelta.TotalMilliseconds * Environment.ProcessorCount);
+            return Math.Round(Math.Clamp(percent, 0, 100), 1);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>Process working set as a percentage of the memory available to the runtime.</summary>
     private static double GetCurrentMemoryUsage()
     {
         try
         {
-            var process = Process.GetCurrentProcess();
-            return Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 1);
+            using var process = Process.GetCurrentProcess();
+            var available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            if (available <= 0)
+                return 0;
+            return Math.Round(Math.Clamp(100.0 * process.WorkingSet64 / available, 0, 100), 1);
         }
         catch
         {
-            return 85.0;
+            return 0;
+        }
+    }
+
+    private static string? GetPrimaryIpAddress()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up &&
+                            n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+                .Select(a => a.Address)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
+                ?.ToString();
+        }
+        catch
+        {
+            return null;
         }
     }
 }

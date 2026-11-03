@@ -57,6 +57,29 @@ public class AdapterTests
     }
 
     [Fact]
+    public async Task ActiveDirectoryAdapter_UnreachableServer_FailsWithLdapErrorNotPlatformError()
+    {
+        // VerifyServerCertificate is Windows-only; on Linux/macOS the factory must not touch it,
+        // so an unreachable DC surfaces as an LDAP error (or a missing native libldap), never as
+        // PlatformNotSupportedException.
+        var adapter = new ActiveDirectoryAdapter();
+        var context = new AdapterExecutionContext
+        {
+            ConfigurationJson = """{"server":"127.0.0.1","port":1,"username":"svc-bermap","timeoutSeconds":2}""",
+            Secret = "not-a-real-password"
+        };
+
+        var testResult = await adapter.TestConnectionAsync(context);
+        var discovery = await adapter.DiscoverAsync(context);
+
+        Assert.False(testResult.Success);
+        Assert.DoesNotContain("platform", testResult.ErrorDetail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.False(discovery.Success);
+        Assert.Equal("Failed", discovery.Status);
+        Assert.NotEmpty(discovery.Errors);
+    }
+
+    [Fact]
     public void ActiveDirectoryAdapter_AdvertisesExpectedCapabilities()
     {
         var adapter = new ActiveDirectoryAdapter();

@@ -24,14 +24,16 @@ namespace BerMap.Integrations.VMware;
 ///   GET    /api/vcenter/datacenter
 ///   GET    /api/vcenter/cluster
 ///   GET    /api/vcenter/host
-///   GET    /api/vcenter/vm
 ///   GET    /api/vcenter/datastore
 ///   GET    /api/vcenter/network
 ///   GET    /api/vcenter/resource-pool
+///   GET    /api/vcenter/vm?filter.hosts={host}   (VM inventory; the unfiltered list caps at 4000 VMs)
 ///   GET    /api/vcenter/vm/{vm}
-///   GET    /api/vcenter/host/{host}/hardware
+///   GET    /api/vcenter/vm/{vm}/tools
+///   GET    /api/vcenter/vm/{vm}/guest/identity               (503 while VMware Tools is not running)
+///   GET    /api/vcenter/vm/{vm}/guest/networking/interfaces
+///   GET    /api/vcenter/host/{host}/hardware                 (undocumented; SOAP summary.hardware fallback)
 ///   GET    /api/vcenter/host?filter.clusters={cluster}
-///   GET    /api/vcenter/vm?filter.hosts={host}
 ///
 /// Optional SOAP enrichment (enabled by default) reads host/VM quickStats from
 /// /sdk using a read-only session. If SOAP is unavailable, discovery still
@@ -211,7 +213,6 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             var datacenters = await client.GetDatacentersAsync(cancellationToken);
             var clusters = await client.GetClustersAsync(cancellationToken);
             var hosts = await client.GetHostsAsync(cancellationToken);
-            var vmSummaries = await client.GetVmSummariesAsync(cancellationToken);
             var datastores = await client.GetDatastoresAsync(cancellationToken);
             var networks = await client.GetNetworksAsync(cancellationToken);
             var resourcePools = await client.GetResourcePoolsAsync(cancellationToken);
@@ -219,7 +220,6 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             result.Statistics["Datacenters"] = datacenters.Count;
             result.Statistics["Clusters"] = clusters.Count;
             result.Statistics["Hosts"] = hosts.Count;
-            result.Statistics["Vms"] = vmSummaries.Count;
             result.Statistics["Datastores"] = datastores.Count;
             result.Statistics["Networks"] = networks.Count;
             result.Statistics["ResourcePools"] = resourcePools.Count;
@@ -251,27 +251,46 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    lock (result.Warnings)
-                        result.Warnings.Add($"Cluster host membership query failed for {cluster.Name}: {SafeMessage(ex)}");
+                    lock (result.Errors)
+                        result.Errors.Add($"Cluster host membership query failed for {cluster.Name}: {SafeMessage(ex)}");
                 }
             }, cancellationToken);
 
-            Report("Topology", "Reading VM-to-host placement...", 34);
+            // The unfiltered GET /api/vcenter/vm fails once vCenter holds more than 4000 VMs, so the
+            // VM inventory is assembled from per-host queries (which also give VM-to-host placement).
+            // The unfiltered list is only used when vCenter reports no hosts at all.
+            Report("Topology", "Reading VM inventory and VM-to-host placement...", 34);
             var vmToHost = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            await ForEachConcurrentAsync(hosts, config.MaxConcurrency, async host =>
+            var vmById = new ConcurrentDictionary<string, VCenterVmSummary>(StringComparer.OrdinalIgnoreCase);
+            if (hosts.Count > 0)
             {
-                try
+                await ForEachConcurrentAsync(hosts, config.MaxConcurrency, async host =>
                 {
-                    var vmIds = await client.GetVmIdsForHostAsync(host.Id, cancellationToken);
-                    foreach (var vmId in vmIds)
-                        vmToHost[vmId] = host.Id;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    lock (result.Warnings)
-                        result.Warnings.Add($"VM placement query failed for host {host.Name}: {SafeMessage(ex)}");
-                }
-            }, cancellationToken);
+                    try
+                    {
+                        var hostVms = await client.GetVmSummariesAsync(host.Id, cancellationToken);
+                        foreach (var vm in hostVms)
+                        {
+                            vmById[vm.Id] = vm;
+                            vmToHost[vm.Id] = host.Id;
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // Missing VMs would otherwise be treated as deleted by stale detection.
+                        lock (result.Errors)
+                            result.Errors.Add($"VM inventory query failed for host {host.Name}: {SafeMessage(ex)}");
+                    }
+                }, cancellationToken);
+            }
+            else
+            {
+                foreach (var vm in await client.GetVmSummariesAsync(null, cancellationToken))
+                    vmById[vm.Id] = vm;
+            }
+
+            var vmSummaries = vmById.Values.OrderBy(v => v.Id, StringComparer.OrdinalIgnoreCase).ToList();
+            result.Statistics["Vms"] = vmSummaries.Count;
 
             Report("VMs", "Reading VM identity, guest, disk and NIC details...", 48);
             var vmDetails = new ConcurrentDictionary<string, VmDetail>(StringComparer.OrdinalIgnoreCase);
@@ -280,14 +299,15 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             {
                 try
                 {
-                    var detail = await client.GetVmDetailAsync(vm.Id, cancellationToken);
+                    var detail = await client.GetVmDetailAsync(vm.Id, vm.PowerState, cancellationToken);
                     if (detail != null)
                         vmDetails[vm.Id] = detail;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    lock (result.Warnings)
-                        result.Warnings.Add($"VM detail query failed for {vm.Name}: {SafeMessage(ex)}");
+                    // Without details the VM's storage/network relationships are missing from the snapshot.
+                    lock (result.Errors)
+                        result.Errors.Add($"VM detail query failed for {vm.Name}: {SafeMessage(ex)}");
                 }
                 finally
                 {
@@ -317,6 +337,15 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 {
                     result.Warnings.Add($"SOAP quickStats enrichment failed; capacity-only metrics will be used: {SafeMessage(ex)}");
                 }
+            }
+
+            // /api/vcenter/host/{host}/hardware is not part of the documented vSphere Automation API and
+            // is missing on many vCenter builds. Fill gaps from SOAP summary.hardware when available.
+            foreach (var host in hosts)
+            {
+                var merged = MergeHostHardware(hostHardware.GetValueOrDefault(host.Id), hostStats.GetValueOrDefault(host.Id));
+                if (merged != null)
+                    hostHardware[host.Id] = merged;
             }
 
             Report("Graph", "Building normalized vCenter graph...", 80);
@@ -546,7 +575,9 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                     ExternalId = $"vm:{summary.Id}",
                     NodeType = "VirtualMachine",
                     Name = summary.Name,
-                    FQDN = detail?.Fqdn ?? (summary.Name.Contains('.') ? summary.Name : string.Empty),
+                    FQDN = !string.IsNullOrWhiteSpace(detail?.Fqdn)
+                        ? detail.Fqdn
+                        : summary.Name.Contains('.') ? summary.Name : string.Empty,
                     IPAddress = detail?.IpAddress,
                     MacAddress = detail?.MacAddress,
                     Status = summary.PowerState switch
@@ -643,8 +674,12 @@ public sealed class VMwareAdapter : IIntegrationAdapter
 
             result.Nodes = nodes.Values.ToList();
             result.Relationships = relationships.Values.ToList();
-            result.Success = true;
-            result.Status = result.Errors.Count > 0 ? "PartialSuccess" : "Completed";
+            // Any failed inventory phase leaves the snapshot incomplete; Success=false prevents the
+            // ingestion pipeline from marking objects absent from this result as stale.
+            result.Success = result.Errors.Count == 0;
+            result.Status = result.Errors.Count > 0
+                ? (result.Nodes.Count > 0 ? "PartialSuccess" : "Failed")
+                : "Completed";
             result.Statistics["Nodes"] = result.Nodes.Count;
             result.Statistics["Relationships"] = result.Relationships.Count;
             result.Statistics["VirtualMachines"] = result.Nodes.Count(n => n.NodeType == "VirtualMachine");
@@ -675,6 +710,30 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             if (client != null)
                 await client.DisposeAsync();
         }
+    }
+
+    private static HostHardware? MergeHostHardware(HostHardware? rest, QuickStats? soap)
+    {
+        if (soap == null)
+            return rest;
+
+        var soapMemoryMb = soap.MemoryBytes > 0 ? soap.MemoryBytes / 1024 / 1024 : 0;
+        if (rest == null)
+        {
+            if (soap.CpuMhz <= 0 && soap.CpuCores <= 0 && soapMemoryMb <= 0 && string.IsNullOrWhiteSpace(soap.HardwareUuid))
+                return null;
+            return new HostHardware(soap.CpuCores, soap.CpuThreads, soap.CpuMhz, soapMemoryMb,
+                soap.Vendor, soap.Model, soap.HardwareUuid);
+        }
+
+        return new HostHardware(
+            rest.CpuCores > 0 ? rest.CpuCores : soap.CpuCores,
+            rest.CpuThreads > 0 ? rest.CpuThreads : soap.CpuThreads,
+            rest.CpuMhz > 0 ? rest.CpuMhz : soap.CpuMhz,
+            rest.MemoryMb > 0 ? rest.MemoryMb : soapMemoryMb,
+            !string.IsNullOrWhiteSpace(rest.Vendor) ? rest.Vendor : soap.Vendor,
+            !string.IsNullOrWhiteSpace(rest.Model) ? rest.Model : soap.Model,
+            !string.IsNullOrWhiteSpace(rest.HardwareUuid) ? rest.HardwareUuid : soap.HardwareUuid);
     }
 
     private static double Percent(double usage, double capacity)
@@ -720,7 +779,8 @@ public sealed class VMwareAdapter : IIntegrationAdapter
         private readonly VMwareConfiguration _config;
         private readonly List<string> _warnings;
         private readonly HttpClient _http;
-        private string? _sessionId;
+        private readonly SemaphoreSlim _authLock = new(1, 1);
+        private volatile string? _sessionId;
 
         public VCenterRestClient(VMwareConfiguration config, List<string> warnings)
         {
@@ -747,14 +807,29 @@ public sealed class VMwareAdapter : IIntegrationAdapter
 
         public async Task ConnectAsync(CancellationToken cancellationToken)
         {
-            _sessionId = null;
+            await _authLock.WaitAsync(cancellationToken);
+            try
+            {
+                var previous = _sessionId;
+                _sessionId = await CreateSessionAsync(cancellationToken);
+                if (!string.IsNullOrWhiteSpace(previous))
+                    await DeleteSessionAsync(previous);
+            }
+            finally
+            {
+                _authLock.Release();
+            }
+        }
+
+        private async Task<string> CreateSessionAsync(CancellationToken cancellationToken)
+        {
             using var request = new HttpRequestMessage(HttpMethod.Post, "api/session");
             request.Headers.Authorization = new AuthenticationHeaderValue("Basic",
                 Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_config.Username}:{_config.Password}")));
             request.Content = new ByteArrayContent(Array.Empty<byte>());
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-            using var response = await _http.SendAsync(request, cancellationToken);
+            using var response = await SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -763,38 +838,106 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             }
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            string? sessionId;
             try
             {
                 using var doc = JsonDocument.Parse(json);
-                _sessionId = doc.RootElement.ValueKind == JsonValueKind.String
+                sessionId = doc.RootElement.ValueKind == JsonValueKind.String
                     ? doc.RootElement.GetString()
                     : JsonHelpers.GetString(doc.RootElement, "session_id");
             }
             catch (JsonException)
             {
-                _sessionId = json.Trim().Trim('"');
+                sessionId = json.Trim().Trim('"');
             }
 
-            if (string.IsNullOrWhiteSpace(_sessionId))
+            if (string.IsNullOrWhiteSpace(sessionId))
                 throw new AdapterConfigurationException("VMWARE_SESSION", "vCenter returned an empty session id.");
+            return sessionId;
         }
 
-        public async Task<JsonDocument?> GetAsync(string path, CancellationToken cancellationToken)
+        /// <summary>
+        /// Replaces an expired session. Concurrent callers that saw the same 401 serialize on the
+        /// auth lock; only the first one reconnects, the rest reuse the session it created.
+        /// </summary>
+        private async Task ReauthenticateAsync(string failedSessionId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(_sessionId))
-                throw new InvalidOperationException("vCenter session is not established.");
-
-            for (var attempt = 0; attempt <= _config.RetryCount; attempt++)
+            await _authLock.WaitAsync(cancellationToken);
+            try
             {
+                if (!string.Equals(_sessionId, failedSessionId, StringComparison.Ordinal))
+                    return;
+
+                _sessionId = await CreateSessionAsync(cancellationToken);
+                await DeleteSessionAsync(failedSessionId);
+            }
+            finally
+            {
+                _authLock.Release();
+            }
+        }
+
+        private async Task DeleteSessionAsync(string sessionId)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Delete, "api/session");
+                request.Headers.TryAddWithoutValidation("vmware-api-session-id", sessionId);
+                using var response = await _http.SendAsync(request, CancellationToken.None);
+            }
+            catch
+            {
+                // Session cleanup is best effort; vCenter expires idle sessions on its own.
+            }
+        }
+
+        /// <summary>
+        /// Sends a request and converts HttpClient.Timeout (surfaced as TaskCanceledException)
+        /// into a TimeoutException so it is reported as a failure rather than user cancellation.
+        /// </summary>
+        private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await _http.SendAsync(request, cancellationToken);
+            }
+            catch (TaskCanceledException e) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"vCenter {request.Method} {request.RequestUri} timed out after {_config.TimeoutSeconds}s.", e);
+            }
+        }
+
+        /// <summary>
+        /// GET with session renewal and 429/5xx retry. 404 returns null; with
+        /// <paramref name="unavailableMeansNoData"/> 503 does too (guest endpoints answer 503
+        /// while VMware Tools is not running).
+        /// </summary>
+        public async Task<JsonDocument?> GetAsync(string path, CancellationToken cancellationToken, bool unavailableMeansNoData = false)
+        {
+            var attempt = 0;
+            var reauthenticated = false;
+            while (true)
+            {
+                var sessionId = _sessionId;
+                if (string.IsNullOrWhiteSpace(sessionId))
+                    throw new InvalidOperationException("vCenter session is not established.");
+
                 using var request = new HttpRequestMessage(HttpMethod.Get, path);
-                request.Headers.TryAddWithoutValidation("vmware-api-session-id", _sessionId);
-                using var response = await _http.SendAsync(request, cancellationToken);
+                request.Headers.TryAddWithoutValidation("vmware-api-session-id", sessionId);
+                using var response = await SendAsync(request, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.NotFound)
                     return null;
 
-                if (response.StatusCode == HttpStatusCode.Unauthorized && attempt == 0)
+                if (unavailableMeansNoData && response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                    return null;
+
+                // Expired session: re-authenticate once per request. This does not consume the
+                // 429/5xx retry budget, and a second 401 falls through to a hard failure.
+                if (response.StatusCode == HttpStatusCode.Unauthorized && !reauthenticated)
                 {
-                    await ConnectAsync(cancellationToken);
+                    reauthenticated = true;
+                    await ReauthenticateAsync(sessionId, cancellationToken);
                     continue;
                 }
 
@@ -802,13 +945,17 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                     attempt < _config.RetryCount)
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt)), cancellationToken);
+                    attempt++;
                     continue;
                 }
 
                 if (!response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                    throw new HttpRequestException($"vCenter GET {path} failed with {(int)response.StatusCode}: {Truncate(body, 300)}");
+                    throw new HttpRequestException(
+                        $"vCenter GET {path} failed with {(int)response.StatusCode}: {Truncate(body, 300)}",
+                        null,
+                        response.StatusCode);
                 }
 
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -816,8 +963,6 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                     return null;
                 return JsonDocument.Parse(json);
             }
-
-            return null;
         }
 
         public async Task<List<VCenterDatacenter>> GetDatacentersAsync(CancellationToken ct)
@@ -851,9 +996,13 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 .Where(h => h.Id.Length > 0).ToList();
         }
 
-        public async Task<List<VCenterVmSummary>> GetVmSummariesAsync(CancellationToken ct)
+        /// <summary>VMs on one host, or the unfiltered list (limited to 4000 VMs by vCenter) when hostId is null.</summary>
+        public async Task<List<VCenterVmSummary>> GetVmSummariesAsync(string? hostId, CancellationToken ct)
         {
-            using var doc = await GetAsync("api/vcenter/vm", ct);
+            var path = hostId == null
+                ? "api/vcenter/vm"
+                : $"api/vcenter/vm?filter.hosts={Uri.EscapeDataString(hostId)}";
+            using var doc = await GetAsync(path, ct);
             return ParseArray(doc, e => new VCenterVmSummary(
                 JsonHelpers.GetString(e, "vm") ?? string.Empty,
                 JsonHelpers.GetString(e, "name") ?? string.Empty,
@@ -922,48 +1071,16 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 .Where(id => id.Length > 0).ToList();
         }
 
-        public async Task<List<string>> GetVmIdsForHostAsync(string hostId, CancellationToken ct)
+        public async Task<VmDetail?> GetVmDetailAsync(string vmId, string powerState, CancellationToken ct)
         {
-            using var doc = await GetAsync($"api/vcenter/vm?filter.hosts={Uri.EscapeDataString(hostId)}", ct);
-            return ParseArray(doc, e => JsonHelpers.GetString(e, "vm") ?? string.Empty)
-                .Where(id => id.Length > 0).ToList();
-        }
-
-        public async Task<VmDetail?> GetVmDetailAsync(string vmId, CancellationToken ct)
-        {
-            using var doc = await GetAsync($"api/vcenter/vm/{Uri.EscapeDataString(vmId)}", ct);
+            var vmPath = $"api/vcenter/vm/{Uri.EscapeDataString(vmId)}";
+            using var doc = await GetAsync(vmPath, ct);
             if (doc == null)
                 return null;
             var root = doc.RootElement;
             var identity = JsonHelpers.GetProperty(root, "identity");
-            var guest = JsonHelpers.GetProperty(root, "guest");
             var cpu = JsonHelpers.GetProperty(root, "cpu");
             var memory = JsonHelpers.GetProperty(root, "memory");
-
-            var fqdn = JsonHelpers.GetString(guest, "host_name") ?? string.Empty;
-            var ip = JsonHelpers.GetString(guest, "ip_address");
-            if (string.IsNullOrWhiteSpace(ip))
-            {
-                var guestNet = JsonHelpers.GetProperty(guest, "net");
-                if (guestNet.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var nic in guestNet.EnumerateArray())
-                    {
-                        var addresses = JsonHelpers.GetProperty(nic, "ip_address");
-                        if (addresses.ValueKind == JsonValueKind.Array)
-                        {
-                            var candidate = addresses.EnumerateArray()
-                                .Select(a => a.ValueKind == JsonValueKind.String ? a.GetString() : null)
-                                .FirstOrDefault(a => !string.IsNullOrWhiteSpace(a) && a != "127.0.0.1" && !a.Contains(':'));
-                            if (!string.IsNullOrWhiteSpace(candidate))
-                            {
-                                ip = candidate;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
 
             var datastores = new List<string>();
             var disks = JsonHelpers.GetProperty(root, "disks");
@@ -996,18 +1113,70 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                     networkIds.Add(network);
             }
 
+            // Vcenter.VM.Info has no guest section. Guest data comes from dedicated endpoints which
+            // answer 503 (or 404) while VMware Tools is not running; that is "no data", not an error.
+            var toolsStatus = string.Empty;
+            using (var tools = await GetOptionalAsync($"{vmPath}/tools", ct))
+            {
+                if (tools != null)
+                    toolsStatus = JsonHelpers.GetString(tools.RootElement, "run_state") ?? string.Empty;
+            }
+
+            var guestHostName = string.Empty;
+            var guestOs = string.Empty;
+            string? ip = null;
+            if (string.Equals(powerState, "POWERED_ON", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var guestIdentity = await GetOptionalAsync($"{vmPath}/guest/identity", ct))
+                {
+                    if (guestIdentity != null)
+                    {
+                        var guest = guestIdentity.RootElement;
+                        guestHostName = JsonHelpers.GetString(guest, "host_name") ?? string.Empty;
+                        guestOs = JsonHelpers.GetString(JsonHelpers.GetProperty(guest, "full_name"), "default_message")
+                            ?? JsonHelpers.GetString(guest, "name")
+                            ?? string.Empty;
+                        ip = UsableIpv4(JsonHelpers.GetString(guest, "ip_address"));
+                    }
+                }
+
+                using (var interfaces = await GetOptionalAsync($"{vmPath}/guest/networking/interfaces", ct))
+                {
+                    if (interfaces != null && interfaces.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var guestNic in interfaces.RootElement.EnumerateArray())
+                        {
+                            var guestMac = JsonHelpers.GetString(guestNic, "mac_address");
+                            if (string.IsNullOrWhiteSpace(macAddress) && !string.IsNullOrWhiteSpace(guestMac))
+                                macAddress = guestMac;
+
+                            if (ip != null)
+                                continue;
+                            var addresses = JsonHelpers.GetProperty(JsonHelpers.GetProperty(guestNic, "ip"), "ip_addresses");
+                            foreach (var address in JsonHelpers.EnumerateObjectValues(addresses))
+                            {
+                                ip = UsableIpv4(JsonHelpers.GetString(address, "ip_address"));
+                                if (ip != null)
+                                    break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(guestOs))
+                guestOs = JsonHelpers.GetString(root, "guest_OS") ?? string.Empty;
+
             return new VmDetail
             {
                 BiosUuid = JsonHelpers.GetString(identity, "bios_uuid") ?? string.Empty,
                 InstanceUuid = JsonHelpers.GetString(identity, "instance_uuid") ?? string.Empty,
-                GuestHostName = JsonHelpers.GetString(guest, "host_name") ?? string.Empty,
-                Fqdn = fqdn,
+                GuestHostName = guestHostName,
+                Fqdn = guestHostName.Contains('.') ? guestHostName : string.Empty,
                 IpAddress = ip,
                 MacAddress = macAddress,
-                GuestOs = JsonHelpers.GetString(guest, "guest_full_name")
-                    ?? JsonHelpers.GetString(guest, "guest_id")
-                    ?? string.Empty,
-                ToolsStatus = JsonHelpers.GetString(guest, "tools_status") ?? string.Empty,
+                GuestOs = guestOs,
+                ToolsStatus = toolsStatus,
                 CpuCount = JsonHelpers.GetInt(cpu, "count"),
                 CoresPerSocket = JsonHelpers.GetInt(cpu, "cores_per_socket"),
                 MemoryMb = JsonHelpers.GetLong(memory, "size_MiB"),
@@ -1017,6 +1186,33 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 NicCount = JsonHelpers.CountObjectValues(nics),
                 ResourcePoolId = JsonHelpers.GetString(root, "resource_pool") ?? string.Empty
             };
+        }
+
+        /// <summary>
+        /// GET for optional enrichment endpoints (tools/guest): unavailable data or an endpoint the
+        /// vCenter build does not support yields null. Timeouts and cancellation still propagate.
+        /// </summary>
+        private async Task<JsonDocument?> GetOptionalAsync(string path, CancellationToken ct)
+        {
+            try
+            {
+                return await GetAsync(path, ct, unavailableMeansNoData: true);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException)
+            {
+                return null;
+            }
+        }
+
+        private static string? UsableIpv4(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value) ||
+                !IPAddress.TryParse(value, out var parsed) ||
+                parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+                IPAddress.IsLoopback(parsed) ||
+                value.StartsWith("169.254.", StringComparison.Ordinal))
+                return null;
+            return parsed.ToString();
         }
 
         private static IEnumerable<T> ParseArray<T>(JsonDocument? doc, Func<JsonElement, T> map)
@@ -1029,19 +1225,9 @@ public sealed class VMwareAdapter : IIntegrationAdapter
         public async ValueTask DisposeAsync()
         {
             if (!string.IsNullOrWhiteSpace(_sessionId))
-            {
-                try
-                {
-                    using var request = new HttpRequestMessage(HttpMethod.Delete, "api/session");
-                    request.Headers.TryAddWithoutValidation("vmware-api-session-id", _sessionId);
-                    using var response = await _http.SendAsync(request);
-                }
-                catch
-                {
-                    // Session cleanup is best effort.
-                }
-            }
+                await DeleteSessionAsync(_sessionId);
             _http.Dispose();
+            _authLock.Dispose();
         }
 
         private static string Truncate(string value, int max)
@@ -1122,11 +1308,14 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                         ? await RetrievePropertiesAsync(view, cancellationToken)
                         : await ContinueRetrievePropertiesAsync(token, cancellationToken);
 
-                    var objects = response.Descendants().FirstOrDefault(e => e.Name.LocalName == "objects");
-                    if (objects != null)
-                        ParseObjects(objects, stats);
+                    // RetrieveResult: <returnval><token/>?<objects/>*</returnval>. Each ObjectContent is a
+                    // sibling "objects" element directly under returnval.
+                    var returnval = response.Descendants().FirstOrDefault(e => e.Name.LocalName == "returnval");
+                    if (returnval == null)
+                        break;
 
-                    token = response.Descendants().FirstOrDefault(e => e.Name.LocalName == "token")?.Value;
+                    ParseObjects(returnval.Elements().Where(e => e.Name.LocalName == "objects"), stats);
+                    token = ChildValue(returnval, "token");
                 } while (!string.IsNullOrWhiteSpace(token));
             }
             finally
@@ -1147,7 +1336,11 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                         new XElement(Vim + "pathSet", "summary.quickStats.overallMemoryUsage"),
                         new XElement(Vim + "pathSet", "summary.hardware.cpuMhz"),
                         new XElement(Vim + "pathSet", "summary.hardware.numCpuCores"),
-                        new XElement(Vim + "pathSet", "summary.hardware.memorySize")),
+                        new XElement(Vim + "pathSet", "summary.hardware.numCpuThreads"),
+                        new XElement(Vim + "pathSet", "summary.hardware.memorySize"),
+                        new XElement(Vim + "pathSet", "summary.hardware.vendor"),
+                        new XElement(Vim + "pathSet", "summary.hardware.model"),
+                        new XElement(Vim + "pathSet", "summary.hardware.uuid")),
                     new XElement(Vim + "propSet",
                         new XElement(Vim + "type", "VirtualMachine"),
                         new XElement(Vim + "pathSet", "summary.quickStats.overallCpuUsage"),
@@ -1157,7 +1350,9 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                     new XElement(Vim + "objectSet",
                         new XElement(Vim + "obj", new XAttribute("type", "ContainerView"), view),
                         new XElement(Vim + "skip", "false"),
+                        // selectSet is declared as SelectionSpec; the derived TraversalSpec must be typed explicitly.
                         new XElement(Vim + "selectSet",
+                            new XAttribute(Xsi + "type", "TraversalSpec"),
                             new XElement(Vim + "name", "view"),
                             new XElement(Vim + "type", "ContainerView"),
                             new XElement(Vim + "path", "view"),
@@ -1203,9 +1398,9 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             }
         }
 
-        private static void ParseObjects(XElement objects, Dictionary<string, QuickStats> stats)
+        private static void ParseObjects(IEnumerable<XElement> objects, Dictionary<string, QuickStats> stats)
         {
-            foreach (var obj in objects.Elements().Where(e => e.Name.LocalName == "objects"))
+            foreach (var obj in objects)
             {
                 var moRef = obj.Elements().FirstOrDefault(e => e.Name.LocalName == "obj")?.Value;
                 if (string.IsNullOrWhiteSpace(moRef))
@@ -1237,9 +1432,22 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                             if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cores))
                                 quick.CpuCores = cores;
                             break;
+                        case "summary.hardware.numCpuThreads":
+                            if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var threads))
+                                quick.CpuThreads = threads;
+                            break;
                         case "summary.hardware.memorySize":
                             if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var memBytes))
                                 quick.MemoryBytes = memBytes;
+                            break;
+                        case "summary.hardware.vendor":
+                            quick.Vendor = value;
+                            break;
+                        case "summary.hardware.model":
+                            quick.Model = value;
+                            break;
+                        case "summary.hardware.uuid":
+                            quick.HardwareUuid = value;
                             break;
                         case "config.hardware.numCPU":
                             if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vmCpu))
@@ -1257,9 +1465,11 @@ public sealed class VMwareAdapter : IIntegrationAdapter
 
         private async Task<XElement> PostAsync(XElement body, CancellationToken cancellationToken)
         {
+            // urn:vim25 is the default namespace so unprefixed xsi:type QNames (e.g. "TraversalSpec")
+            // resolve to vim25 types.
             var envelope = new XElement(Soap + "Envelope",
                 new XAttribute(XNamespace.Xmlns + "soapenv", Soap),
-                new XAttribute(XNamespace.Xmlns + "urn", Vim),
+                new XAttribute("xmlns", Vim.NamespaceName),
                 new XAttribute(XNamespace.Xmlns + "xsi", Xsi),
                 new XAttribute(XNamespace.Xmlns + "xsd", Xsd),
                 new XElement(Soap + "Body", body));
@@ -1270,7 +1480,18 @@ public sealed class VMwareAdapter : IIntegrationAdapter
             };
             request.Headers.TryAddWithoutValidation("SOAPAction", "\"urn:vim25/8.0\"");
 
-            using var response = await _http.SendAsync(request, cancellationToken);
+            HttpResponseMessage sent;
+            try
+            {
+                sent = await _http.SendAsync(request, cancellationToken);
+            }
+            catch (TaskCanceledException e) when (!cancellationToken.IsCancellationRequested)
+            {
+                // HttpClient.Timeout is a failure, not user cancellation.
+                throw new TimeoutException($"vCenter SOAP request timed out after {_config.TimeoutSeconds}s.", e);
+            }
+
+            using var response = sent;
             var xml = await response.Content.ReadAsStringAsync(cancellationToken);
             XDocument doc;
             try
@@ -1359,7 +1580,11 @@ public sealed class VMwareAdapter : IIntegrationAdapter
         public double MemoryUsageMb { get; set; }
         public double CpuMhz { get; set; }
         public int CpuCores { get; set; }
+        public int CpuThreads { get; set; }
         public long MemoryBytes { get; set; }
+        public string Vendor { get; set; } = string.Empty;
+        public string Model { get; set; } = string.Empty;
+        public string HardwareUuid { get; set; } = string.Empty;
         public int VmCpuCount { get; set; }
         public long VmMemoryMb { get; set; }
     }

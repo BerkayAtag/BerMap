@@ -229,15 +229,15 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 ? GetString(root, "defaultNamingContext")
                 : config.BaseDn;
             var configNc = GetString(root, "configurationNamingContext");
-            var forestRootDn = GetString(root, "rootDomainNamingContext") ?? baseDn;
 
             if (string.IsNullOrWhiteSpace(baseDn))
                 throw new AdapterConfigurationException("AD_BASE_DN", "Could not determine the domain naming context. Set baseDn explicitly.");
 
+            var forestRootDn = GetString(root, "rootDomainNamingContext") ?? baseDn;
             result.SourceVersion = GetString(root, "vendorVersion");
 
             var primaryDomainDns = DnToDns(baseDn);
-            var forestDns = DnToDns(forestRootDn!);
+            var forestDns = DnToDns(forestRootDn);
             var forestExternalId = $"forest:{forestDns}";
             var primaryDomainExternalId = $"domain:{primaryDomainDns}";
 
@@ -310,7 +310,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    result.Warnings.Add($"Forest domain enumeration failed: {SafeMessage(ex)}");
+                    result.Errors.Add($"Forest domain enumeration failed: {SafeMessage(ex)}");
                 }
             }
 
@@ -358,7 +358,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    result.Warnings.Add($"Domain '{domainDns}' is in the forest but could not be opened read-only: {SafeMessage(ex)}");
+                    result.Errors.Add($"Domain '{domainDns}' is in the forest but could not be opened read-only: {SafeMessage(ex)}");
                 }
             }
 
@@ -436,7 +436,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    result.Warnings.Add($"Additional domain '{additional.Server}' could not be opened: {SafeMessage(ex)}");
+                    result.Errors.Add($"Additional domain '{additional.Server}' could not be opened: {SafeMessage(ex)}");
                 }
             }
 
@@ -463,7 +463,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    result.Warnings.Add($"Domain '{domain.DnsName}' discovery was incomplete: {SafeMessage(ex)}");
+                    result.Errors.Add($"Domain '{domain.DnsName}' discovery was incomplete: {SafeMessage(ex)}");
                 }
             }
 
@@ -477,15 +477,19 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    result.Warnings.Add($"AD Sites/subnet discovery failed: {SafeMessage(ex)}");
+                    result.Errors.Add($"AD Sites/subnet discovery failed: {SafeMessage(ex)}");
                 }
             }
 
             result.Nodes = nodes.Values.ToList();
             result.Relationships = relationships.Values.ToList();
-            result.Success = result.Errors.Count == 0 || result.Nodes.Count > 0;
+            // Any failed phase means the snapshot is incomplete. Success must be false so the
+            // ingestion pipeline does not mark objects missing from this result as stale.
+            // Forest/domain skeleton nodes alone do not count as collected directory data.
+            var collectedObjects = result.Nodes.Any(n => n.NodeType is not ("Forest" or "Domain"));
+            result.Success = result.Errors.Count == 0;
             result.Status = result.Errors.Count > 0
-                ? (result.Nodes.Count > 0 ? "PartialSuccess" : "Failed")
+                ? (collectedObjects ? "PartialSuccess" : "Failed")
                 : "Completed";
             result.Statistics = nodes.Values
                 .GroupBy(n => n.NodeType)
@@ -555,10 +559,15 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                     new[] { "ou", "distinguishedName", "objectGUID", "description", "whenCreated", "whenChanged" },
                     config.PageSize, config.TimeoutSeconds, cancellationToken));
 
+                // Index every OU first: LDAP does not guarantee parents are returned before
+                // children, so parents can only be resolved once the whole set is known.
+                foreach (var entry in ouEntries)
+                    dnToExternalId[entry.DistinguishedName] = ExternalIdFor("ou", entry);
+
                 foreach (var entry in ouEntries)
                 {
                     var dn = entry.DistinguishedName;
-                    var externalId = ExternalIdFor("ou", entry);
+                    var externalId = dnToExternalId[dn];
                     var parentDn = ParentDn(dn);
                     var parentExternalId = ResolveParentExternalId(parentDn, domain.BaseDn, domainExternalId, dnToExternalId);
                     addNode(new DiscoveredNodeContract
@@ -579,21 +588,12 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
                             ["WhenChanged"] = FormatLdapTime(GetString(entry, "whenChanged"))
                         }
                     });
-                    dnToExternalId[dn] = externalId;
-                }
-
-                foreach (var entry in ouEntries)
-                {
-                    var dn = entry.DistinguishedName;
-                    var externalId = dnToExternalId[dn];
-                    var parentDn = ParentDn(dn);
-                    var parentExternalId = ResolveParentExternalId(parentDn, domain.BaseDn, domainExternalId, dnToExternalId);
                     addRelationship(parentExternalId, externalId, "Contains", "AD distinguished-name hierarchy", "Verified", null);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                result.Warnings.Add($"OU discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
+                result.Errors.Add($"OU discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
             }
         }
 
@@ -664,7 +664,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                result.Warnings.Add($"Computer discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
+                result.Errors.Add($"Computer discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
             }
         }
 
@@ -737,7 +737,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                result.Warnings.Add($"Group discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
+                result.Errors.Add($"Group discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
             }
         }
 
@@ -789,7 +789,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                result.Warnings.Add($"Trust discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
+                result.Errors.Add($"Trust discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
             }
         }
 
@@ -802,7 +802,7 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                result.Warnings.Add($"Replication topology discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
+                result.Errors.Add($"Replication topology discovery failed for {domain.DnsName}: {SafeMessage(ex)}");
             }
         }
     }
@@ -1075,10 +1075,22 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
 
     private static string? GetSid(SearchResultEntry entry, string attributeName)
     {
+        var bytes = GetFirstBinary(entry, attributeName);
+        return bytes == null ? null : BinarySidToString(bytes);
+    }
+
+    /// <summary>
+    /// Reads a binary attribute (objectSid, objectGUID). The DirectoryAttribute indexer may
+    /// return a decoded string when the bytes happen to be valid UTF-8, so the raw value is
+    /// always requested explicitly as byte[].
+    /// </summary>
+    private static byte[]? GetFirstBinary(SearchResultEntry entry, string attributeName)
+    {
         var attribute = FindAttribute(entry, attributeName);
-        if (attribute == null || attribute.Count == 0 || attribute[0] is not byte[] bytes)
+        if (attribute == null || attribute.Count == 0)
             return null;
-        return BinarySidToString(bytes);
+        var values = attribute.GetValues(typeof(byte[]));
+        return values.Length > 0 && values[0] is byte[] bytes ? bytes : null;
     }
 
     private static string BinarySidToString(byte[] sid)
@@ -1106,8 +1118,8 @@ public sealed class ActiveDirectoryAdapter : IIntegrationAdapter
 
     private static string ExternalIdFor(string prefix, SearchResultEntry entry)
     {
-        var attribute = FindAttribute(entry, "objectGUID");
-        if (attribute != null && attribute.Count > 0 && attribute[0] is byte[] guidBytes && guidBytes.Length == 16)
+        var guidBytes = GetFirstBinary(entry, "objectGUID");
+        if (guidBytes is { Length: 16 })
             return $"{prefix}:{new Guid(guidBytes):D}";
         return $"{prefix}:{entry.DistinguishedName.ToLowerInvariant()}";
     }
@@ -1484,43 +1496,57 @@ internal static class LdapConnectionFactory
             Timeout = TimeSpan.FromSeconds(config.TimeoutSeconds)
         };
 
-        connection.SessionOptions.ProtocolVersion = 3;
-        connection.SessionOptions.ReferralChasing = ReferralChasingOptions.None;
-
         var lastCertificateError = string.Empty;
-        connection.SessionOptions.VerifyServerCertificate = (_, certificate) =>
-        {
-            if (config.AllowUntrustedCertificate)
-            {
-                warnings.Add("TLS certificate validation is disabled for this integration. This must only be used in an isolated lab.");
-                return true;
-            }
-
-            if (CertificateTrust.Validate(certificate, config.Server, out var error))
-                return true;
-
-            lastCertificateError = error;
-            return false;
-        };
-
-        if (config.UseSsl)
-        {
-            connection.SessionOptions.SecureSocketLayer = true;
-        }
-        else if (config.UseStartTls)
-        {
-            connection.SessionOptions.StartTransportLayerSecurity(new DirectoryControlCollection());
-        }
-        else
-        {
-            warnings.Add("LDAP is running without TLS. Credentials and directory data are transmitted in plaintext.");
-        }
-
         try
         {
+            connection.SessionOptions.ProtocolVersion = 3;
+            connection.SessionOptions.ReferralChasing = ReferralChasingOptions.None;
+
+            if (OperatingSystem.IsWindows())
+            {
+                // WinLDAP supports a managed certificate callback, so trust is evaluated by .NET.
+                connection.SessionOptions.VerifyServerCertificate = (_, certificate) =>
+                {
+                    if (config.AllowUntrustedCertificate)
+                    {
+                        warnings.Add("TLS certificate validation is disabled for this integration. This must only be used in an isolated lab.");
+                        return true;
+                    }
+
+                    if (CertificateTrust.Validate(certificate, config.Server, out var error))
+                        return true;
+
+                    lastCertificateError = error;
+                    return false;
+                };
+            }
+            else
+            {
+                // OpenLDAP (Linux/macOS) does not support VerifyServerCertificate. Verification is left to
+                // libldap's defaults (TLS_REQCERT demand: chain + host name). Trusted CAs come from the
+                // system trust store / OpenLDAP configuration (ldap.conf TLS_CACERT/TLS_CACERTDIR).
+                if (config.AllowUntrustedCertificate && (config.UseSsl || config.UseStartTls))
+                {
+                    warnings.Add("allowUntrustedCertificate is not supported on this platform; certificate verification remains enforced by OpenLDAP. Add the issuing CA to the system/OpenLDAP trust store instead.");
+                }
+            }
+
+            if (config.UseSsl)
+            {
+                connection.SessionOptions.SecureSocketLayer = true;
+            }
+            else if (config.UseStartTls)
+            {
+                connection.SessionOptions.StartTransportLayerSecurity(new DirectoryControlCollection());
+            }
+            else
+            {
+                warnings.Add("LDAP is running without TLS. Credentials and directory data are transmitted in plaintext.");
+            }
+
             connection.Bind();
         }
-        catch (LdapException) when (!string.IsNullOrWhiteSpace(lastCertificateError))
+        catch (Exception ex) when ((ex is LdapException or DirectoryOperationException) && !string.IsNullOrWhiteSpace(lastCertificateError))
         {
             connection.Dispose();
             throw new AdapterConfigurationException("AD_TLS_CERTIFICATE", $"TLS certificate validation failed: {lastCertificateError}");
