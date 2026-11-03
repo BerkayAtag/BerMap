@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BerMap.Domain\BerMap.Domain.csproj" />
+    <ProjectReference Include="..\BerMap.Contracts\BerMap.Contracts.csproj" />
+    <ProjectReference Include="..\BerMap.Application\BerMap.Application.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

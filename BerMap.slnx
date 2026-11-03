@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BerMap.Api/BerMap.Api.csproj" />
+    <Project Path="src/BerMap.Application/BerMap.Application.csproj" />
+    <Project Path="src/BerMap.Collector/BerMap.Collector.csproj" />
+    <Project Path="src/BerMap.Contracts/BerMap.Contracts.csproj" />
+    <Project Path="src/BerMap.Domain/BerMap.Domain.csproj" />
+    <Project Path="src/BerMap.Infrastructure/BerMap.Infrastructure.csproj" />
+    <Project Path="src/BerMap.Simulation/BerMap.Simulation.csproj" />
+    <Project Path="src/BerMap.Worker/BerMap.Worker.csproj" />
+  </Folder>
+  <Folder Name="/src/BerMap.Integrations/">
+    <Project Path="src/BerMap.Integrations/BerMap.Integrations.ActiveDirectory/BerMap.Integrations.ActiveDirectory.csproj" />
+    <Project Path="src/BerMap.Integrations/BerMap.Integrations.VMware/BerMap.Integrations.VMware.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BerMap.Tests.Integration/BerMap.Tests.Integration.csproj" />
+    <Project Path="tests/BerMap.Tests.Unit/BerMap.Tests.Unit.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BerMap.Infrastructure\BerMap.Infrastructure.csproj" />
+    <ProjectReference Include="..\BerMap.Application\BerMap.Application.csproj" />
+    <ProjectReference Include="..\BerMap.Simulation\BerMap.Simulation.csproj" />
+    <ProjectReference Include="..\BerMap.Integrations\BerMap.Integrations.ActiveDirectory\BerMap.Integrations.ActiveDirectory.csproj" />
+    <ProjectReference Include="..\BerMap.Integrations\BerMap.Integrations.VMware\BerMap.Integrations.VMware.csproj" />
+  </ItemGroup>
+
+</Project>
