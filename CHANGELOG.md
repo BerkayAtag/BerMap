@@ -1,5 +1,14 @@
 # Sürüm geçmişi
 
+## 0.2.0 — 2026-11-04
+
+### Yeni
+- **Zamanlanmış keşif:** Entegrasyonların cron takvimi artık çalıştırılıyor. Beş alanlı cron (`*/15`, aralık, liste, `MON-FRI`, `@daily`) sunucunun yerel saatinde değerlendirilir (`BerMap:DiscoveryScheduler:TimeZone` ile değiştirilebilir).
+  - Kesinti sonrası kaçırılan çalışmalardan yalnız biri yapılır; elle başlatılan keşif o dilimin çalışması sayılır.
+  - Birden çok API sunucusu aynı veritabanını paylaşabilir; PostgreSQL advisory kilidi zamanlamanın tek sunucuda yapılmasını sağlar.
+  - Geçersiz cron artık kayıtta reddediliyor (`SCHEDULE_INVALID`, nedeniyle birlikte); daha önce yalnız alan sayısı kontrol ediliyordu.
+  - Entegrasyon kartında "Sonraki Keşif" zamanı gösteriliyor; sihirbazda cron örnekleri var.
+
 ## 0.1.0 — 2026-11-04 (önizleme)
 
 İlk kamuya açık önizleme. Başka bir araçla üretilen kod tabanı baştan sona incelendi; aşağıdaki hatalar düzeltildi.
@@ -46,6 +55,6 @@
 - GitHub Actions: derleme, testler (PostgreSQL servisiyle), lint ve frontend derlemesi; tanıtım sayfası GitHub Pages'e yayımlanır.
 
 ### Bilinen sınırlamalar
-- Zamanlanmış (cron) keşif kaydediliyor ama çalıştırılmıyor; keşif konsoldan başlatılır.
+- Zamanlanmış (cron) keşif kaydediliyor ama çalıştırılmıyor; keşif konsoldan başlatılır. (0.2.0'da giderildi.)
 - Simülasyon her zaman canlı graf üzerinde çalışır.
 - Collector kayıt olur, heartbeat gönderir ve kuyruğu boşaltır; adaptörleri kendisi henüz çalıştırmaz.

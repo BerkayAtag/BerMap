@@ -592,6 +592,11 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                     value={form.scheduleCron}
                     onChange={(e) => update('scheduleCron', e.target.value)}
                   />
+                  <p className="text-[11px] text-neutral-400 mt-1">
+                    {isTr
+                      ? 'Dakika saat gün ay haftanın-günü, sunucu saatiyle. Örn. 0 2 * * * her gün 02:00, 0 */6 * * * altı saatte bir.'
+                      : 'Minute hour day month weekday, in server time. E.g. 0 2 * * * daily at 02:00, 0 */6 * * * every six hours.'}
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-neutral-600 dark:text-neutral-400 mb-1">

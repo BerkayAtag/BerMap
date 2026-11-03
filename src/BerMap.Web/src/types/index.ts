@@ -179,6 +179,9 @@ export interface Integration {
   status: string;
   isEnabled: boolean;
   scheduleCron: string;
+  /** UTC; in the past means due and about to be queued; null when disabled. */
+  nextScheduledRunAt?: string | null;
+  scheduleTimeZone?: string;
   timeoutSeconds: number;
   configurationVersion: number;
   configuration: Record<string, unknown>;

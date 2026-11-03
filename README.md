@@ -97,8 +97,14 @@ cd src/BerMap.Web && npm run lint && npm run build
 ```
 The PostgreSQL integration tests run when `BERMAP_TEST_CONNECTION_STRING` points at a server where the user may create databases; otherwise they are skipped.
 
+### Scheduled discovery
+Each integration has a five-field cron schedule (`minute hour day-of-month month day-of-week`, e.g. `0 2 * * *` for 02:00 daily; `*/15`, ranges, lists, `MON-FRI`, `@daily` are supported). The API checks schedules every 30 seconds and queues a full discovery when the first occurrence after the integration's last discovery has passed:
+- Schedules are evaluated in the server's local time zone; set `BerMap:DiscoveryScheduler:TimeZone` (e.g. `Europe/Istanbul`) to override.
+- After downtime only one missed run is caught up, and a manual discovery counts as the run for its slot.
+- Several API instances can share a database; a PostgreSQL advisory lock lets one of them schedule at a time.
+- `BerMap:DiscoveryScheduler:Enabled` (default `true`) and `PollSeconds` (default `30`) control the scheduler.
+
 ### Known limitations of this preview
-- Scheduled (cron) discovery is stored but not executed; start discovery from the Integrations page.
 - Simulations always run against the live graph, not a snapshot.
 - The collector enrolls, heartbeats and forwards queued batches, but does not run adapters itself yet.
 

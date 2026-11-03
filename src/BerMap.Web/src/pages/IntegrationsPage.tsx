@@ -588,6 +588,23 @@ export const IntegrationsPage: React.FC = () => {
                       </dd>
                     </div>
                     <div className="flex justify-between gap-2 py-1 border-b border-neutral-100 dark:border-dark-border">
+                      <dt className="text-neutral-500">{isTr ? 'Sonraki Keşif' : 'Next Discovery'}</dt>
+                      <dd
+                        className="text-neutral-700 dark:text-neutral-300 text-right"
+                        title={
+                          integration.nextScheduledRunAt
+                            ? `${formatDateTime(integration.nextScheduledRunAt)} · ${integration.scheduleTimeZone ?? ''}`
+                            : undefined
+                        }
+                      >
+                        {!integration.nextScheduledRunAt
+                          ? '—'
+                          : new Date(integration.nextScheduledRunAt).getTime() <= Date.now()
+                            ? isTr ? 'Sırada' : 'Due now'
+                            : formatRelativeTime(integration.nextScheduledRunAt)}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-2 py-1 border-b border-neutral-100 dark:border-dark-border">
                       <dt className="text-neutral-500">{isTr ? 'Son Test' : 'Last Test'}</dt>
                       <dd className="text-right">
                         {integration.lastTestSuccess == null ? (

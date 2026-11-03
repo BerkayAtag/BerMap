@@ -121,6 +121,9 @@ builder.Services.AddScoped<IInventoryService, InventoryService>();
 builder.Services.AddScoped<IDashboardService, DashboardService>();
 builder.Services.AddSingleton<IDiscoveryJobRunner, DiscoveryJobRunner>();
 builder.Services.AddHostedService<DiscoveryBackgroundService>();
+builder.Services.AddSingleton(DiscoveryScheduleSettings.FromConfiguration(builder.Configuration));
+builder.Services.AddScoped<DiscoveryScheduler>();
+builder.Services.AddHostedService<DiscoverySchedulerService>();
 
 var allowedOrigins = builder.Configuration
     .GetSection("BerMap:Cors:AllowedOrigins")

@@ -41,7 +41,7 @@
 <main id="main">
   <section class="hero">
     <div class="hero-copy">
-      <p class="eyebrow" lang="en">Sürüm 0.1 · Önizleme · Windows Server ve Linux</p>
+      <p class="eyebrow">Sürüm 0.2 · Önizleme · <span lang="en">Windows Server</span> ve <span lang="en">Linux</span></p>
       <h1>Altyapınızı haritalayın.<br><em>Değişikliği önce ikizde deneyin.</em></h1>
       <p class="lead">BerMap, Active Directory ve vCenter'ı salt okunur keşfeder, sunucuları, sanal makineleri ve bağımlılıkları tek bir grafta uzlaştırır. Bir host çökerse neyin etkileneceğini üretime dokunmadan görürsünüz.</p>
       <div class="actions">
@@ -70,7 +70,7 @@
       <h2>Bir envanterden fazlası.<br><em>Yaşayan bir altyapı grafı.</em></h2>
     </div>
     <div class="features">
-      <article><span class="num">01 / Keşif</span><h3>Salt okunur adaptörler</h3><p>Active Directory (LDAPS, sayfalı arama) ve vCenter (REST + PropertyCollector) okunur; kaynak sistemlere hiçbir yazma işlemi yapılmaz. Kimlik bilgileri AES-GCM ile şifreli kasada saklanır.</p></article>
+      <article><span class="num">01 / Keşif</span><h3>Salt okunur adaptörler</h3><p>Active Directory (LDAPS, sayfalı arama) ve vCenter (REST + PropertyCollector) cron takvimine göre okunur; kaynak sistemlere hiçbir yazma işlemi yapılmaz. Kimlik bilgileri AES-GCM ile şifreli kasada saklanır.</p></article>
       <article><span class="num">02 / Uzlaştırma</span><h3>Tek varlık, çok kaynak</h3><p>Bir sunucu AD'de bilgisayar, vCenter'da sanal makine olarak görünür. SID, BIOS UUID ve FQDN ile tek düğümde birleşir; yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.</p></article>
       <article><span class="num">03 / Harita</span><h3>Bağımlılık grafı</h3><p>Datacenter, cluster, host, VM, datastore, ağ ve uygulama ilişkileri etkileşimli haritada. Eski (stale) kayıtlar silinmez, geçmiş bağlam için işaretlenir.</p></article>
       <article><span class="num">04 / Etki</span><h3>Patlama yarıçapı</h3><p>Bir düğüm seçin; ona bağlı uygulamaları, veritabanlarını ve servisleri derinlik ve güven düzeyiyle görün. Değişiklik toplantısına kanıtla gelin.</p></article>
@@ -130,7 +130,7 @@
         <li><b>Hazırlayın</b><span>.NET 10 SDK, Node.js 20+ ve PostgreSQL 16+ kurun; BerMap için bir veritabanı ve kullanıcı oluşturun.</span></li>
         <li><b>Yapılandırın</b><span>appsettings dosyasında bağlantı dizesini, kasa dizinini ve collector kayıt token'ını ayarlayın. İsterseniz ilk yönetici parolasını da verin.</span></li>
         <li><b>Çalıştırın</b><span>API ilk açılışta migration'ları uygular, rolleri ve <code>admin</code> hesabını oluşturur. Parola verilmediyse üretilen parola kasa dizinindeki dosyaya yazılır.</span></li>
-        <li><b>Bağlayın</b><span>Konsola giriş yapın, Entegrasyonlar ekranından AD ve vCenter'ı ekleyin, bağlantıyı test edip ilk keşfi başlatın.</span></li>
+        <li><b>Bağlayın</b><span>Konsola giriş yapın, Entegrasyonlar ekranından AD ve vCenter'ı ekleyin, bağlantıyı test edip ilk keşfi başlatın. Sonraki keşifler entegrasyonun cron takvimine göre kendiliğinden çalışır.</span></li>
       </ol>
       <figure class="install-shot">
         <img src="assets/integrations.png" data-light-src="assets/integrations.png" data-dark-src="assets/integrations-dark.png" alt="BerMap entegrasyon yönetimi: Active Directory ve vCenter bağlantıları ve keşif işleri" width="1440" height="900" loading="lazy">
@@ -142,7 +142,7 @@
       <a class="link" href="https://github.com/BerkayAtag/BerMap/tree/main/docs/architecture">Mimari belgeler →</a>
       <a class="link" href="https://github.com/BerkayAtag/BerMap/blob/main/docs/architecture/13-installation-upgrade.md">Kurulum ve yükseltme →</a>
     </div>
-    <p class="note">BerMap önizleme sürümündedir: hazır kurulum paketi yoktur ve zamanlanmış (cron) keşif henüz çalışmaz, keşif konsoldan başlatılır. Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.</p>
+    <p class="note">BerMap önizleme sürümündedir: hazır kurulum paketi yoktur; simülasyon her zaman güncel graf üzerinde çalışır. Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.</p>
   </section>
 </main>
 

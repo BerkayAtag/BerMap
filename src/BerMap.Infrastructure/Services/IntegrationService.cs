@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
+using BerMap.Application.Services.Scheduling;
 using BerMap.Contracts;
 using BerMap.Domain.Entities;
 using BerMap.Domain.Enums;
@@ -32,6 +33,7 @@ public sealed class IntegrationService : IIntegrationService
     private readonly IAuditService _auditService;
     private readonly IDiscoveryJobRunner _jobRunner;
     private readonly ILogger<IntegrationService> _logger;
+    private readonly DiscoveryScheduleSettings _schedule;
 
     public IntegrationService(
         BerMapDbContext context,
@@ -39,7 +41,8 @@ public sealed class IntegrationService : IIntegrationService
         ICredentialStore credentialStore,
         IAuditService auditService,
         IDiscoveryJobRunner jobRunner,
-        ILogger<IntegrationService> logger)
+        ILogger<IntegrationService> logger,
+        DiscoveryScheduleSettings schedule)
     {
         _context = context;
         _registry = registry;
@@ -47,6 +50,7 @@ public sealed class IntegrationService : IIntegrationService
         _auditService = auditService;
         _jobRunner = jobRunner;
         _logger = logger;
+        _schedule = schedule;
     }
 
     public async Task<List<IntegrationDto>> ListAsync(CancellationToken cancellationToken = default)
@@ -57,7 +61,8 @@ public sealed class IntegrationService : IIntegrationService
             .OrderBy(i => i.Name)
             .ToListAsync(cancellationToken);
 
-        return integrations.Select(MapIntegration).ToList();
+        var lastStarts = await LastJobStartsAsync(integrations.Select(i => i.Id).ToList(), cancellationToken);
+        return integrations.Select(i => MapIntegration(i, lastStarts.GetValueOrDefault(i.Id))).ToList();
     }
 
     public async Task<IntegrationDto?> GetAsync(Guid id, CancellationToken cancellationToken = default)
@@ -66,7 +71,11 @@ public sealed class IntegrationService : IIntegrationService
             .AsNoTracking()
             .FirstOrDefaultAsync(i => i.Id == id && i.DeletedAt == null, cancellationToken);
 
-        return integration == null ? null : MapIntegration(integration);
+        if (integration == null)
+            return null;
+
+        var lastStarts = await LastJobStartsAsync(new List<Guid> { integration.Id }, cancellationToken);
+        return MapIntegration(integration, lastStarts.GetValueOrDefault(integration.Id));
     }
 
     public async Task<IntegrationDto> CreateAsync(
@@ -111,7 +120,7 @@ public sealed class IntegrationService : IIntegrationService
             JsonSerializer.Serialize(new { integration.AdapterType, integration.Name }),
             GetIpAddress(), true, cancellationToken);
 
-        return MapIntegration(integration);
+        return MapIntegration(integration, null);
     }
 
     public async Task<IntegrationDto?> UpdateAsync(
@@ -183,7 +192,8 @@ public sealed class IntegrationService : IIntegrationService
             JsonSerializer.Serialize(new { integration.Name, integration.ConfigurationVersion }),
             GetIpAddress(), true, cancellationToken);
 
-        return MapIntegration(integration);
+        var lastStarts = await LastJobStartsAsync(new List<Guid> { integration.Id }, cancellationToken);
+        return MapIntegration(integration, lastStarts.GetValueOrDefault(integration.Id));
     }
 
     public async Task<bool> DeleteAsync(Guid id, string actor, CancellationToken cancellationToken = default)
@@ -498,9 +508,8 @@ public sealed class IntegrationService : IIntegrationService
         if (string.IsNullOrWhiteSpace(schedule))
             throw new IntegrationValidationException("SCHEDULE_REQUIRED", "Discovery schedule is required.");
 
-        var parts = schedule.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length != 5)
-            throw new IntegrationValidationException("SCHEDULE_INVALID", "Discovery schedule must be a five-field cron expression.");
+        if (!CronSchedule.TryParse(schedule, out _, out var error))
+            throw new IntegrationValidationException("SCHEDULE_INVALID", $"Discovery schedule is not a valid cron expression: {error}");
     }
 
     private static int ClampTimeout(int seconds) => Math.Clamp(seconds, 30, 86_400);
@@ -571,8 +580,25 @@ public sealed class IntegrationService : IIntegrationService
         }
     }
 
-    private IntegrationDto MapIntegration(Integration integration)
+    private async Task<Dictionary<Guid, DateTime>> LastJobStartsAsync(List<Guid> integrationIds, CancellationToken cancellationToken)
     {
+        if (integrationIds.Count == 0)
+            return new Dictionary<Guid, DateTime>();
+
+        return await _context.DiscoveryJobs
+            .AsNoTracking()
+            .Where(j => integrationIds.Contains(j.IntegrationId))
+            .GroupBy(j => j.IntegrationId)
+            .Select(g => new { IntegrationId = g.Key, LastStartedAt = g.Max(j => j.StartedAt) })
+            .ToDictionaryAsync(x => x.IntegrationId, x => x.LastStartedAt, cancellationToken);
+    }
+
+    private IntegrationDto MapIntegration(Integration integration, DateTime? lastJobStartedAt)
+    {
+        DateTime? nextScheduledRunAt = null;
+        if (integration.IsEnabled && CronSchedule.TryParse(integration.ScheduleCron, out var schedule, out _))
+            nextScheduledRunAt = _schedule.NextRun(schedule, integration.CreatedAt, lastJobStartedAt);
+
         var descriptor = _registry.GetDescriptors()
             .FirstOrDefault(d => d.AdapterType.Equals(integration.AdapterType, StringComparison.OrdinalIgnoreCase));
 
@@ -587,6 +613,8 @@ public sealed class IntegrationService : IIntegrationService
             Status = integration.Status.ToString(),
             IsEnabled = integration.IsEnabled,
             ScheduleCron = integration.ScheduleCron,
+            NextScheduledRunAt = nextScheduledRunAt,
+            ScheduleTimeZone = _schedule.TimeZone.Id,
             TimeoutSeconds = integration.TimeoutSeconds,
             ConfigurationVersion = integration.ConfigurationVersion,
             Configuration = configuration,

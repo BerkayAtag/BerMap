@@ -28,6 +28,17 @@ public sealed class IntegrationDto
     public string Status { get; set; } = string.Empty;
     public bool IsEnabled { get; set; }
     public string ScheduleCron { get; set; } = string.Empty;
+
+    /// <summary>
+    /// When the scheduler will queue the next discovery (UTC). A time in the
+    /// past means it is due and will be queued within the scheduler interval;
+    /// null when the integration is disabled.
+    /// </summary>
+    public DateTime? NextScheduledRunAt { get; set; }
+
+    /// <summary>Time zone the schedule is evaluated in.</summary>
+    public string ScheduleTimeZone { get; set; } = string.Empty;
+
     public int TimeoutSeconds { get; set; }
     public int ConfigurationVersion { get; set; }
 
