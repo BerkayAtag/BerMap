@@ -70,6 +70,7 @@ builder.Services.AddSingleton<ICredentialStore>(_ => new CredentialStore(vaultDi
 var tokenLifetime = TimeSpan.FromMinutes(Math.Clamp(
     builder.Configuration.GetValue("BerMap:Auth:TokenLifetimeMinutes", 480), 5, 24 * 60));
 builder.Services.AddSingleton(new AccessTokenService(vaultDirectory, tokenLifetime));
+builder.Services.AddMemoryCache();
 builder.Services
     .AddAuthentication(BearerTokenAuthenticationHandler.SchemeName)
     .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, BearerTokenAuthenticationHandler>(
@@ -87,6 +88,20 @@ builder.Services.AddAuthorization(options =>
         nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator),
         nameof(BerMap.Domain.Enums.UserRole.InfrastructureOperator)));
 });
+// Behind IIS/nginx the TCP peer is the proxy. Only forwarded headers from the
+// configured proxies are trusted, so the login limiter and the audit log see
+// the real client address and clients cannot spoof it.
+builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor |
+                               Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
+    foreach (var proxy in builder.Configuration.GetSection("BerMap:ReverseProxy:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (System.Net.IPAddress.TryParse(proxy, out var address))
+            options.KnownProxies.Add(address);
+    }
+});
+
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -200,8 +215,24 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi().AllowAnonymous();
 }
 
-await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration, vaultDirectory, app.Logger);
+// PostgreSQL may still be starting (service start order after a reboot,
+// containers starting together): retry for a while instead of exiting.
+for (var attempt = 1; ; attempt++)
+{
+    try
+    {
+        await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration, vaultDirectory, app.Logger);
+        break;
+    }
+    catch (Exception ex) when (attempt < 30 && ex is Npgsql.NpgsqlException or System.Net.Sockets.SocketException or TimeoutException)
+    {
+        app.Logger.LogWarning("Database is not reachable yet (attempt {Attempt}/30): {Message}. Retrying in 5 seconds.",
+            attempt, ex.Message);
+        await Task.Delay(TimeSpan.FromSeconds(5));
+    }
+}
 
+app.UseForwardedHeaders();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 

@@ -22,7 +22,7 @@ public sealed class AccessTokenService
 
     public AccessTokenService(string vaultDirectory, TimeSpan lifetime)
     {
-        Directory.CreateDirectory(vaultDirectory);
+        SecretFile.EnsureDirectory(vaultDirectory);
         var keyPath = Path.Combine(vaultDirectory, SigningKeyFileName);
 
         if (File.Exists(keyPath) && new FileInfo(keyPath).Length >= 32)

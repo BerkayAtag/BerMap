@@ -169,12 +169,20 @@ public class CollectorsController : ControllerBase
         if (!integrationExists)
             return NotFound(new { message = $"Integration '{integrationId}' was not found." });
 
+        // Protocol: a batch without jobId opens a collector job. final=true
+        // completes it (a single-batch snapshot sends final=true right away);
+        // otherwise the job stays open and further batches carry ?jobId=.
         DiscoveryJob job;
         if (jobId.HasValue)
         {
             job = await _context.DiscoveryJobs
                 .FirstOrDefaultAsync(j => j.Id == jobId.Value && j.IntegrationId == integrationId, cancellationToken)
                 ?? throw new KeyNotFoundException($"Discovery job '{jobId}' was not found for this integration.");
+
+            if (job.JobType != "Collector")
+                return Conflict(new { message = $"Discovery job '{job.Id}' is not a collector job." });
+            if (job.Status != DiscoveryJobStatus.Running)
+                return Conflict(new { message = $"Discovery job '{job.Id}' is already {job.Status}." });
         }
         else
         {
@@ -187,26 +195,28 @@ public class CollectorsController : ControllerBase
                 StartedAt = DateTime.UtcNow,
                 CurrentPhase = "Ingesting",
                 CurrentMessage = "Collector batch received.",
-                RequestedBy = this.GetActor()
+                RequestedBy = "collector"
             };
             _context.DiscoveryJobs.Add(job);
             await _context.SaveChangesAsync(cancellationToken);
         }
 
-        if (job.Status is not (DiscoveryJobStatus.Queued or DiscoveryJobStatus.Running))
-            return Conflict(new { message = $"Discovery job '{job.Id}' is already {job.Status}." });
+        // Errors and warnings accumulate over every batch of the job: a final
+        // batch that is clean does not make an earlier failed batch complete.
+        var errors = ParseStringList(job.ErrorsJson).Concat(batch.Errors).ToList();
+        if (!batch.Success && batch.Errors.Count == 0)
+            errors.Add("A collector batch reported failure without details.");
+        var isCompleteSnapshot = final && errors.Count == 0;
 
-        // A collector sends one source in several batches; only the batch that
-        // completes a successful full snapshot may mark unseen objects stale.
-        var isCompleteSnapshot = final && batch.Success && batch.Errors.Count == 0;
-
+        // Ingestion is not tied to the HTTP request: a collector timing out must
+        // not abort a half-written graph or leave the job open.
         IngestionResult ingestion;
         try
         {
             ingestion = await _ingestionService.IngestAsync(
-                integrationId, job.Id, batch, isCompleteSnapshot, cancellationToken);
+                integrationId, job.Id, batch, isCompleteSnapshot, CancellationToken.None);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             _context.ChangeTracker.Clear();
             var failed = await _context.DiscoveryJobs.FirstAsync(j => j.Id == job.Id, CancellationToken.None);
@@ -214,53 +224,56 @@ public class CollectorsController : ControllerBase
             failed.CompletedAt = DateTime.UtcNow;
             failed.CurrentPhase = "Failed";
             failed.CurrentMessage = "Collector batch could not be ingested.";
-            failed.ErrorsJson = JsonSerializer.Serialize(new[] { $"INGESTION_FAILED: {ex.Message}" });
+            failed.ErrorsJson = JsonSerializer.Serialize(errors.Append($"INGESTION_FAILED: {ex.Message}"));
             await _context.SaveChangesAsync(CancellationToken.None);
             throw;
         }
 
+        var statistics = ParseCounts(job.StatisticsJson);
+        foreach (var (key, value) in batch.Statistics)
+            statistics[key] = statistics.GetValueOrDefault(key) + value;
+
         job.EntitiesDiscovered += batch.Nodes.Count;
         job.RelationshipsDiscovered += batch.Relationships.Count;
-        job.ProgressPercent = 100;
-        job.CurrentPhase = "Completed";
-        job.CurrentMessage = batch.Success ? "Collector batch ingested." : "Collector batch ingested with errors.";
-        job.CompletedAt = DateTime.UtcNow;
-        job.DurationMs = (long)(job.CompletedAt.Value - job.StartedAt).TotalMilliseconds;
-        var batchComplete = final || !jobId.HasValue;
-        job.Status = !batchComplete
-            ? DiscoveryJobStatus.Running
-            : batch.Success ? DiscoveryJobStatus.Completed : DiscoveryJobStatus.PartialSuccess;
-        if (!batchComplete)
-        {
-            job.CompletedAt = null;
-            job.DurationMs = null;
-            job.CurrentPhase = "Ingesting";
-            job.CurrentMessage = "Collector batch ingested; waiting for further batches.";
-        }
-        job.ErrorsJson = JsonSerializer.Serialize(batch.Errors);
-        job.WarningsJson = JsonSerializer.Serialize(batch.Warnings.Concat(ingestion.Warnings));
-        job.StatisticsJson = JsonSerializer.Serialize(batch.Statistics);
+        job.ErrorsJson = JsonSerializer.Serialize(errors);
+        job.WarningsJson = JsonSerializer.Serialize(
+            ParseStringList(job.WarningsJson).Concat(batch.Warnings).Concat(ingestion.Warnings).Distinct());
+        job.StatisticsJson = JsonSerializer.Serialize(statistics);
+        job.UpdatedAt = DateTime.UtcNow;
 
-        if (batchComplete)
+        if (final)
         {
+            job.Status = errors.Count == 0 ? DiscoveryJobStatus.Completed : DiscoveryJobStatus.PartialSuccess;
+            job.ProgressPercent = 100;
+            job.CurrentPhase = "Completed";
+            job.CurrentMessage = errors.Count == 0 ? "Collector snapshot ingested." : "Collector snapshot ingested with errors.";
+            job.CompletedAt = DateTime.UtcNow;
+            job.DurationMs = (long)(job.CompletedAt.Value - job.StartedAt).TotalMilliseconds;
+
             // Collector-fed integrations report health the same way as
             // server-side discovery does, otherwise they stay "Inactive" forever.
-            var integration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, cancellationToken);
-            integration.Status = batch.Success && batch.Errors.Count == 0
+            var integration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, CancellationToken.None);
+            integration.Status = errors.Count == 0
                 ? (integration.IsEnabled ? IntegrationStatus.Active : IntegrationStatus.Inactive)
                 : IntegrationStatus.Degraded;
-            integration.LastError = batch.Errors.FirstOrDefault() ?? string.Empty;
-            integration.LastErrorAt = batch.Errors.Count > 0 ? DateTime.UtcNow : null;
+            integration.LastError = errors.FirstOrDefault() ?? string.Empty;
+            integration.LastErrorAt = errors.Count > 0 ? DateTime.UtcNow : null;
             integration.LastJobId = job.Id;
             integration.UpdatedAt = DateTime.UtcNow;
         }
+        else
+        {
+            job.CurrentPhase = "Ingesting";
+            job.CurrentMessage = "Collector batch ingested; waiting for further batches.";
+        }
 
-        await _context.SaveChangesAsync(cancellationToken);
+        await _context.SaveChangesAsync(CancellationToken.None);
 
         return Ok(new
         {
             success = batch.Success,
             jobId = job.Id,
+            jobCompleted = final,
             nodesCreated = ingestion.NodesCreated,
             nodesUpdated = ingestion.NodesUpdated,
             relationshipsCreated = ingestion.RelationshipsCreated,
@@ -362,6 +375,18 @@ public class CollectorsController : ControllerBase
         catch (JsonException)
         {
             return new List<string>();
+        }
+    }
+
+    private static Dictionary<string, int> ParseCounts(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, int>>(json) ?? new();
+        }
+        catch (JsonException)
+        {
+            return new();
         }
     }
 

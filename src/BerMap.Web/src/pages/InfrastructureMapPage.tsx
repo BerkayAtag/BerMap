@@ -196,11 +196,14 @@ export const InfrastructureMapPage: React.FC = () => {
     const data = topologyQuery.data;
     if (!data) return;
     const flow = buildFlowGraph(data, tokens, matchNode, selectedNodeId);
+    // Existing nodes are updated in place (style/data only) so React Flow keeps
+    // their measured size, selection and dragged position; replacing them would
+    // hide and re-measure the whole canvas on every keystroke or click.
     setNodes((current) => {
-      const previous = new Map(current.map((node) => [node.id, node.position]));
+      const previous = new Map(current.map((node) => [node.id, node]));
       return flow.nodes.map((node) => {
-        const position = previous.get(node.id);
-        return position ? { ...node, position } : node;
+        const existing = previous.get(node.id);
+        return existing ? { ...existing, style: node.style, data: node.data } : node;
       });
     });
     setEdges(flow.edges);

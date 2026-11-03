@@ -18,6 +18,8 @@ namespace BerMap.Infrastructure.Services;
 
 public sealed class IntegrationService : IIntegrationService
 {
+    private static readonly TimeSpan AbandonedCollectorJobAge = TimeSpan.FromMinutes(30);
+
     private static readonly HashSet<string> CommonSecretKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "password", "secret", "token", "apikey", "api_key", "clientsecret", "client_secret",
@@ -306,6 +308,25 @@ public sealed class IntegrationService : IIntegrationService
 
         var adapter = RequireAdapter(integration.AdapterType);
 
+        // Collector jobs stay Running between batches. One that has not
+        // received a batch for a long time was abandoned by its collector and
+        // must not block discovery of the integration forever.
+        var abandonedBefore = DateTime.UtcNow - AbandonedCollectorJobAge;
+        var abandoned = await _context.DiscoveryJobs
+            .Where(j => j.IntegrationId == id && j.JobType == "Collector" &&
+                        j.Status == DiscoveryJobStatus.Running &&
+                        (j.UpdatedAt ?? j.StartedAt) < abandonedBefore)
+            .ToListAsync(cancellationToken);
+        foreach (var stale in abandoned)
+        {
+            stale.Status = DiscoveryJobStatus.Failed;
+            stale.CompletedAt = DateTime.UtcNow;
+            stale.CurrentPhase = "Failed";
+            stale.CurrentMessage = "The collector stopped sending batches before the snapshot was completed.";
+        }
+        if (abandoned.Count > 0)
+            await _context.SaveChangesAsync(cancellationToken);
+
         var runningJob = await _context.DiscoveryJobs
             .AsNoTracking()
             .AnyAsync(j => j.IntegrationId == id &&
@@ -322,7 +343,7 @@ public sealed class IntegrationService : IIntegrationService
             JobType = string.IsNullOrWhiteSpace(request.JobType) ? "Full" : request.JobType.Trim(),
             Status = DiscoveryJobStatus.Queued,
             StartedAt = DateTime.UtcNow,
-            RequestedBy = string.IsNullOrWhiteSpace(request.RequestedBy) ? actor : request.RequestedBy,
+            RequestedBy = actor,
             CurrentPhase = "Queued",
             CurrentMessage = "Waiting for the discovery worker."
         };
@@ -392,9 +413,22 @@ public sealed class IntegrationService : IIntegrationService
         }
         else if (job.Status == DiscoveryJobStatus.Running)
         {
-            if (!_jobRunner.RequestCancellation(jobId))
+            if (_jobRunner.RequestCancellation(jobId))
+            {
+                job.CurrentMessage = "Cancellation requested.";
+            }
+            else if (job.JobType == "Collector")
+            {
+                // Collector jobs have no in-process runner; close them directly.
+                job.Status = DiscoveryJobStatus.Cancelled;
+                job.CompletedAt = DateTime.UtcNow;
+                job.CurrentPhase = "Cancelled";
+                job.CurrentMessage = "Cancelled while waiting for further collector batches.";
+            }
+            else
+            {
                 return false;
-            job.CurrentMessage = "Cancellation requested.";
+            }
         }
         else
         {

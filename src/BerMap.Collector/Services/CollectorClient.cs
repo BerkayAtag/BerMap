@@ -27,9 +27,11 @@ public interface ICollectorClient
 
     /// <summary>
     /// Sends a batch, or buffers it in the offline queue when the server is unreachable or a backlog
-    /// exists (to preserve ordering). <paramref name="final"/> marks the batch that completes a full snapshot.
+    /// exists (to preserve ordering). All batches of one snapshot pass the same
+    /// <paramref name="snapshotId"/>; <paramref name="final"/> marks the batch that completes it.
+    /// A single-batch snapshot passes final=true and needs no snapshot id.
     /// </summary>
-    Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? jobId = null, bool final = false, CancellationToken cancellationToken = default);
+    Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default);
 
     /// <summary>Delivers buffered batches in order. Returns false when a delivery failed and should be retried later.</summary>
     Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default);
@@ -39,7 +41,17 @@ public interface ICollectorClient
 public sealed class QueuedBatch
 {
     public DiscoveryResult Batch { get; set; } = new();
+
+    /// <summary>Server job id, when already known at enqueue time.</summary>
     public Guid? JobId { get; set; }
+
+    /// <summary>
+    /// Client-side id shared by all batches of one snapshot. The server's job
+    /// id is only known after the first batch is delivered (which may happen
+    /// later, from the offline queue), so later batches are linked through it.
+    /// </summary>
+    public Guid? SnapshotId { get; set; }
+
     public bool Final { get; set; }
 }
 
@@ -55,6 +67,10 @@ public class CollectorClient : ICollectorClient
     private readonly string _version;
     private readonly SemaphoreSlim _registrationLock = new(1, 1);
     private Guid? _collectorId;
+
+    // Server job id of each open multi-batch snapshot, learned from the
+    // response to its first delivered batch.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, Guid> _snapshotJobs = new();
 
     // CPU sampling state: process CPU time and wall clock at the previous heartbeat.
     private TimeSpan? _lastCpuTime;
@@ -185,9 +201,9 @@ public class CollectorClient : ICollectorClient
         }
     }
 
-    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? jobId = null, bool final = false, CancellationToken cancellationToken = default)
+    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default)
     {
-        var queued = new QueuedBatch { Batch = batch, JobId = jobId, Final = final };
+        var queued = new QueuedBatch { Batch = batch, SnapshotId = snapshotId, Final = final };
 
         // Never overtake buffered batches: a later batch must not be ingested before an earlier one.
         if (_offlineQueue.GetQueueDepth(BatchQueue) > 0)
@@ -282,13 +298,32 @@ public class CollectorClient : ICollectorClient
 
     private async Task<DeliveryOutcome> PostBatchAsync(QueuedBatch queued, CancellationToken cancellationToken)
     {
+        var jobId = queued.JobId;
+        if (jobId == null && queued.SnapshotId is { } pendingSnapshot &&
+            _snapshotJobs.TryGetValue(pendingSnapshot, out var knownJob))
+            jobId = knownJob;
+
         var query = $"?final={(queued.Final ? "true" : "false")}";
-        if (queued.JobId.HasValue)
-            query += $"&jobId={queued.JobId.Value:D}";
+        if (jobId.HasValue)
+            query += $"&jobId={jobId.Value:D}";
 
         using var response = await _httpClient.PostAsJsonAsync("/api/collectors/submit-batch" + query, queued.Batch, cancellationToken);
         if (response.IsSuccessStatusCode)
+        {
+            if (queued.SnapshotId is { } snapshotId)
+            {
+                if (queued.Final)
+                {
+                    _snapshotJobs.TryRemove(snapshotId, out _);
+                }
+                else if (jobId == null && await ReadJobIdAsync(response, cancellationToken) is { } openedJob)
+                {
+                    _snapshotJobs[snapshotId] = openedJob;
+                }
+            }
+
             return DeliveryOutcome.Accepted;
+        }
 
         var status = (int)response.StatusCode;
         _logger.LogWarning("Batch submission returned {StatusCode}.", status);
@@ -298,6 +333,21 @@ public class CollectorClient : ICollectorClient
         if (status is >= 400 and < 500 and not (401 or 403 or 408 or 429))
             return DeliveryOutcome.Rejected;
         return DeliveryOutcome.Transient;
+    }
+
+    private static async Task<Guid?> ReadJobIdAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            return doc.RootElement.TryGetProperty("jobId", out var id) && Guid.TryParse(id.GetString(), out var jobId)
+                ? jobId
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private async Task BufferAsync(QueuedBatch queued, string reason)

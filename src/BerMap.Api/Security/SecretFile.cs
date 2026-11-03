@@ -1,29 +1,15 @@
-using System;
-using System.IO;
+using System.Text;
+using BerMap.Infrastructure.Security;
 
 namespace BerMap.Api.Security;
 
-/// <summary>
-/// Writes secret material so that, on Unix hosts, only the service account can
-/// read it. On Windows the vault directory ACL is managed by the installer.
-/// </summary>
+/// <summary>Owner-only secret files inside the credential vault.</summary>
 internal static class SecretFile
 {
-    public static void WriteAllBytes(string path, byte[] content)
-    {
-        File.WriteAllBytes(path, content);
-        RestrictToOwner(path);
-    }
+    public static void EnsureDirectory(string path) => SecureVault.EnsureDirectory(path);
 
-    public static void WriteAllText(string path, string content)
-    {
-        File.WriteAllText(path, content);
-        RestrictToOwner(path);
-    }
+    public static void WriteAllBytes(string path, byte[] content) => SecureVault.WriteAllBytes(path, content);
 
-    private static void RestrictToOwner(string path)
-    {
-        if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-    }
+    public static void WriteAllText(string path, string content) =>
+        SecureVault.WriteAllBytes(path, Encoding.UTF8.GetBytes(content));
 }

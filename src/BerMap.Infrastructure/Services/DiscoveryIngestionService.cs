@@ -200,6 +200,20 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             }
         }
 
+        bool TryResolveNode(string externalId, out Guid nodeId)
+        {
+            if (externalToNodeId.TryGetValue(externalId, out nodeId))
+                return true;
+            if (!string.IsNullOrWhiteSpace(externalId) &&
+                linksByExternalId.TryGetValue(externalId.Trim(), out var persisted))
+            {
+                nodeId = persisted.NodeId;
+                return true;
+            }
+            nodeId = Guid.Empty;
+            return false;
+        }
+
         // The (source, target, type) key is unique across all integrations. Two
         // sources that reconcile onto the same nodes (or a re-created
         // integration) would otherwise insert a duplicate and fail the run.
@@ -220,8 +234,10 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (!externalToNodeId.TryGetValue(relationship.SourceExternalId, out var sourceNodeId) ||
-                !externalToNodeId.TryGetValue(relationship.TargetExternalId, out var targetNodeId))
+            // Endpoints sent in an earlier batch of a multi-batch snapshot are
+            // resolved through this integration's persisted source links.
+            if (!TryResolveNode(relationship.SourceExternalId, out var sourceNodeId) ||
+                !TryResolveNode(relationship.TargetExternalId, out var targetNodeId))
             {
                 result.Warnings.Add(
                     $"Skipped relationship '{relationship.RelationshipType}' because an endpoint was not present in the discovery result.");
@@ -258,6 +274,12 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
                 relationshipIndex[key] = existing;
                 result.RelationshipsCreated++;
             }
+            else if (existing.IntegrationId != integrationId)
+            {
+                // Owned and refreshed by another integration: reusing it avoids a
+                // duplicate, but its evidence and freshness stay with its owner.
+                continue;
+            }
             else
             {
                 var changed = existing.Evidence != relationship.Evidence ||
@@ -280,7 +302,10 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
 
         // Source links that were not returned by this full discovery become stale.
         // A partial view proves nothing about absent objects, so skip it then.
-        foreach (var link in links.Where(l => isCompleteSnapshot && !seenLinkIds.Contains(l.Id)))
+        // "Seen" is job-wide: a link refreshed by an earlier batch of the same
+        // collector job is not stale just because the final batch omitted it.
+        foreach (var link in links.Where(l =>
+                     isCompleteSnapshot && !seenLinkIds.Contains(l.Id) && l.LastSeenJobId != jobId))
         {
             if (!link.IsStale)
             {

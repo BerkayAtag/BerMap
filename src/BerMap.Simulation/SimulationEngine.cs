@@ -395,7 +395,9 @@ public class SimulationEngine : ISimulationEngine
 
         // Reconciled nodes keep their most specific type (a VM that is also an
         // AD domain controller is a DomainController), so count every direct hit.
-        var directCount = result.ConfirmedImpacts.Count;
+        // Hosts that merely mount a failed datastore keep running; only
+        // workloads count as unavailable.
+        var directCount = result.ConfirmedImpacts.Count(i => !InfrastructureNodeTypes.Contains(i.Type));
         if (directCount > 0)
         {
             recommendations.Add(

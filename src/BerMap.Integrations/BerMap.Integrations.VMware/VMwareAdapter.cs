@@ -256,38 +256,50 @@ public sealed class VMwareAdapter : IIntegrationAdapter
                 }
             }, cancellationToken);
 
-            // The unfiltered GET /api/vcenter/vm fails once vCenter holds more than 4000 VMs, so the
-            // VM inventory is assembled from per-host queries (which also give VM-to-host placement).
-            // The unfiltered list is only used when vCenter reports no hosts at all.
+            // The VM inventory comes from the unfiltered GET /api/vcenter/vm: a VM that vMotions
+            // while the per-host queries run could otherwise be missed by every host query and be
+            // treated as deleted by stale detection. That call fails once vCenter holds more than
+            // 4000 VMs; only then is the inventory assembled from the per-host queries, which are
+            // always used for VM-to-host placement.
             Report("Topology", "Reading VM inventory and VM-to-host placement...", 34);
             var vmToHost = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var vmById = new ConcurrentDictionary<string, VCenterVmSummary>(StringComparer.OrdinalIgnoreCase);
-            if (hosts.Count > 0)
-            {
-                await ForEachConcurrentAsync(hosts, config.MaxConcurrency, async host =>
-                {
-                    try
-                    {
-                        var hostVms = await client.GetVmSummariesAsync(host.Id, cancellationToken);
-                        foreach (var vm in hostVms)
-                        {
-                            vmById[vm.Id] = vm;
-                            vmToHost[vm.Id] = host.Id;
-                        }
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        // Missing VMs would otherwise be treated as deleted by stale detection.
-                        lock (result.Errors)
-                            result.Errors.Add($"VM inventory query failed for host {host.Name}: {SafeMessage(ex)}");
-                    }
-                }, cancellationToken);
-            }
-            else
+            var inventoryFromFullList = false;
+            try
             {
                 foreach (var vm in await client.GetVmSummariesAsync(null, cancellationToken))
                     vmById[vm.Id] = vm;
+                inventoryFromFullList = true;
             }
+            catch (Exception ex) when (ex is not OperationCanceledException && hosts.Count > 0)
+            {
+                lock (result.Warnings)
+                    result.Warnings.Add($"Full VM list unavailable ({SafeMessage(ex)}); building the inventory from per-host queries.");
+            }
+
+            await ForEachConcurrentAsync(hosts, config.MaxConcurrency, async host =>
+            {
+                try
+                {
+                    var hostVms = await client.GetVmSummariesAsync(host.Id, cancellationToken);
+                    foreach (var vm in hostVms)
+                    {
+                        vmById.TryAdd(vm.Id, vm);
+                        vmToHost[vm.Id] = host.Id;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Missing VMs (no full list) or missing HostedOn edges would otherwise be
+                    // treated as deleted by stale detection, so either way this is an error.
+                    lock (result.Errors)
+                    {
+                        result.Errors.Add(inventoryFromFullList
+                            ? $"VM placement query failed for host {host.Name}: {SafeMessage(ex)}"
+                            : $"VM inventory query failed for host {host.Name}: {SafeMessage(ex)}");
+                    }
+                }
+            }, cancellationToken);
 
             var vmSummaries = vmById.Values.OrderBy(v => v.Id, StringComparer.OrdinalIgnoreCase).ToList();
             result.Statistics["Vms"] = vmSummaries.Count;

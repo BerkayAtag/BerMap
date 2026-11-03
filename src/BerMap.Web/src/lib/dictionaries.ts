@@ -28,6 +28,8 @@ export type TranslationKey =
   | 'searchFailed'
   | 'logout'
   | 'restoringSession'
+  | 'sessionRestoreFailed'
+  | 'retry'
   | 'roleUnknown'
   | 'rolePlatformAdministrator'
   | 'roleIntegrationAdministrator'
@@ -82,6 +84,8 @@ const dictionaries: Record<'tr' | 'en', Record<TranslationKey, string>> = {
     searchFailed: 'Arama başarısız oldu',
     logout: 'Çıkış Yap',
     restoringSession: 'Oturum doğrulanıyor...',
+    sessionRestoreFailed: 'Sunucuya ulaşılamadı; oturumunuz korunuyor.',
+    retry: 'Tekrar dene',
     roleUnknown: 'Bilinmeyen Rol',
     rolePlatformAdministrator: 'Platform Yöneticisi',
     roleIntegrationAdministrator: 'Entegrasyon Yöneticisi',
@@ -135,6 +139,8 @@ const dictionaries: Record<'tr' | 'en', Record<TranslationKey, string>> = {
     searchFailed: 'Search failed',
     logout: 'Sign Out',
     restoringSession: 'Restoring session...',
+    sessionRestoreFailed: 'The server could not be reached; your session is kept.',
+    retry: 'Retry',
     roleUnknown: 'Unknown Role',
     rolePlatformAdministrator: 'Platform Administrator',
     roleIntegrationAdministrator: 'Integration Administrator',

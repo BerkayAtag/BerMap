@@ -323,4 +323,34 @@ public class DiscoveryIngestionServiceTests
         Assert.Equal(0, result.RelationshipsCreated);
         Assert.Equal(1, await context.InfrastructureRelationships.CountAsync());
     }
+
+    [Fact]
+    public async Task Ingest_MultiBatchSnapshot_KeepsEarlierBatchesAndLinksAcrossThem()
+    {
+        await using var context = CreateContext();
+        var integration = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+        var jobId = Guid.NewGuid();
+
+        await service.IngestAsync(integration.Id, jobId,
+            BuildBatch(integration.Id,
+                new DiscoveredNodeContract { ExternalId = "host-1", NodeType = "Hypervisor", Name = "esx01", FQDN = "esx01.corp.local", SourceSystem = "VMware" }),
+            isCompleteSnapshot: false);
+
+        var final = BuildBatch(integration.Id,
+            new DiscoveredNodeContract { ExternalId = "vm-1", NodeType = "VirtualMachine", Name = "app01", FQDN = "app01.corp.local", SourceSystem = "VMware" });
+        final.Relationships.Add(new DiscoveredRelationshipContract
+        {
+            SourceExternalId = "vm-1",
+            TargetExternalId = "host-1",
+            RelationshipType = "HostedOn",
+            SourceSystem = "VMware"
+        });
+
+        var result = await service.IngestAsync(integration.Id, jobId, final, isCompleteSnapshot: true);
+
+        Assert.Equal(1, result.RelationshipsCreated);
+        Assert.Equal(0, result.NodesMarkedStale);
+        Assert.False((await context.InfrastructureNodes.SingleAsync(n => n.Name == "esx01")).IsStale);
+    }
 }

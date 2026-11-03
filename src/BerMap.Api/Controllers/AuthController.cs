@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace BerMap.Api.Controllers;
 
@@ -26,12 +27,14 @@ public class AuthController : ControllerBase
     private readonly BerMapDbContext _context;
     private readonly AccessTokenService _tokens;
     private readonly IAuditService _auditService;
+    private readonly IMemoryCache _cache;
 
-    public AuthController(BerMapDbContext context, AccessTokenService tokens, IAuditService auditService)
+    public AuthController(BerMapDbContext context, AccessTokenService tokens, IAuditService auditService, IMemoryCache cache)
     {
         _context = context;
         _tokens = tokens;
         _auditService = auditService;
+        _cache = cache;
     }
 
     public record LoginRequest(string Username, string Password);
@@ -60,6 +63,9 @@ public class AuthController : ControllerBase
 
         user.LastLoginAt = DateTime.UtcNow;
         await _context.SaveChangesAsync(cancellationToken);
+
+        // A just re-enabled account must not stay locked out by a cached "disabled" state.
+        BearerTokenAuthenticationHandler.InvalidateUserState(_cache, user.Id);
 
         var role = PrimaryRole(user);
         var (token, expiresAt) = _tokens.Issue(user.Id, user.Username, user.DisplayName, role);

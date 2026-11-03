@@ -16,10 +16,7 @@ public class CredentialStore : ICredentialStore
     public CredentialStore(string? vaultDirectory = null)
     {
         _vaultPath = vaultDirectory ?? Path.Combine(AppContext.BaseDirectory, "secrets_vault");
-        if (!Directory.Exists(_vaultPath))
-        {
-            Directory.CreateDirectory(_vaultPath);
-        }
+        SecureVault.EnsureDirectory(_vaultPath);
 
         // Derive deterministic machine-level key for demonstration/development
         // On production Windows Server, this is backed by DPAPI; on Linux by kernel keyring
@@ -37,7 +34,7 @@ public class CredentialStore : ICredentialStore
         {
             _masterKey = new byte[32]; // 256-bit
             RandomNumberGenerator.Fill(_masterKey);
-            WriteAtomically(keyPath, _masterKey);
+            SecureVault.WriteAllBytes(keyPath, _masterKey);
         }
     }
 
@@ -67,7 +64,7 @@ public class CredentialStore : ICredentialStore
         var safeFileName = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".enc";
         var filePath = Path.Combine(_vaultPath, safeFileName);
         cancellationToken.ThrowIfCancellationRequested();
-        await Task.Run(() => WriteAtomically(filePath, combined), cancellationToken);
+        await Task.Run(() => SecureVault.WriteAllBytes(filePath, combined), cancellationToken);
     }
 
     public async Task<string?> RetrieveSecretAsync(string key, CancellationToken cancellationToken = default)
@@ -119,31 +116,6 @@ public class CredentialStore : ICredentialStore
     }
 
     private static byte[] AssociatedData(string key) => Encoding.UTF8.GetBytes("bermap-credential:" + key);
-
-    /// <summary>
-    /// Writes to a temporary file and renames it into place so a crash never
-    /// leaves a truncated key or secret behind. On Unix the file is readable by
-    /// the service account only.
-    /// </summary>
-    private static void WriteAtomically(string path, byte[] content)
-    {
-        var temporaryPath = path + ".tmp";
-        using (var stream = OperatingSystem.IsWindows()
-                   ? new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None)
-                   : new FileStream(temporaryPath, new FileStreamOptions
-                   {
-                       Mode = FileMode.Create,
-                       Access = FileAccess.Write,
-                       Share = FileShare.None,
-                       UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
-                   }))
-        {
-            stream.Write(content);
-            stream.Flush(flushToDisk: true);
-        }
-
-        File.Move(temporaryPath, path, overwrite: true);
-    }
 
     public Task DeleteSecretAsync(string key, CancellationToken cancellationToken = default)
     {

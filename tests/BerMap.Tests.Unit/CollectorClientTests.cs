@@ -103,6 +103,27 @@ public class CollectorClientTests : IDisposable
     }
 
     [Fact]
+    public async Task MultiBatchSnapshot_LaterBatchesCarryTheJobOpenedByTheFirst()
+    {
+        var jobId = Guid.NewGuid();
+        _handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent($"{{\"jobId\":\"{jobId}\",\"jobCompleted\":false}}")
+        };
+
+        var client = CreateClient();
+        var snapshot = Guid.NewGuid();
+        Assert.True(await client.SubmitDiscoveryBatchAsync(Batch(1), snapshot, final: false));
+        Assert.True(await client.SubmitDiscoveryBatchAsync(Batch(2), snapshot, final: false));
+        Assert.True(await client.SubmitDiscoveryBatchAsync(Batch(3), snapshot, final: true));
+
+        Assert.DoesNotContain("jobId=", _handler.Requests[0].Query);
+        Assert.Contains($"jobId={jobId}", _handler.Requests[1].Query);
+        Assert.Contains($"jobId={jobId}", _handler.Requests[2].Query);
+        Assert.Contains("final=true", _handler.Requests[2].Query);
+    }
+
+    [Fact]
     public async Task Drain_SendsInOrder_AcksOnSuccess_AndKeepsFailedItemAtHead()
     {
         await _queue.EnqueueAsync(CollectorClient.BatchQueue, new QueuedBatch { Batch = Batch(1) });

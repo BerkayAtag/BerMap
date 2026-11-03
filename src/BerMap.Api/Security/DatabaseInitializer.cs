@@ -129,7 +129,7 @@ public static class DatabaseInitializer
 
         if (generated)
         {
-            Directory.CreateDirectory(vaultDirectory);
+            SecretFile.EnsureDirectory(vaultDirectory);
             var path = Path.Combine(vaultDirectory, InitialPasswordFileName);
             SecretFile.WriteAllText(path, $"username: {user.Username}{Environment.NewLine}password: {password}{Environment.NewLine}");
             logger.LogWarning(

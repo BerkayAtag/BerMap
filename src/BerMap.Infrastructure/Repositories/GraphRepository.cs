@@ -55,8 +55,13 @@ public class GraphRepository : IGraphService
                     .AsNoTracking()
                     .Where(r => frontier.Contains(r.SourceNodeId) || frontier.Contains(r.TargetNodeId))
                     .OrderBy(r => r.Id)
-                    .Take(MaxTopologyRelationships)
+                    .Take(MaxTopologyRelationships + 1)
                     .ToListAsync(cancellationToken);
+                if (relationships.Count > MaxTopologyRelationships)
+                {
+                    relationships.RemoveAt(relationships.Count - 1);
+                    result.IsTruncated = true;
+                }
 
                 var next = new HashSet<Guid>();
                 foreach (var rel in relationships)
@@ -84,7 +89,7 @@ public class GraphRepository : IGraphService
                 .Take(MaxTopologyNodes - 1)
                 .ToListAsync(cancellationToken);
             nodes.Insert(0, center);
-            result.IsTruncated = visited.Count > nodes.Count;
+            result.IsTruncated |= visited.Count > nodes.Count;
 
             var nodeIds = nodes.Select(n => n.Id).ToHashSet();
             var relationshipsForNodes = await _context.InfrastructureRelationships
@@ -94,8 +99,13 @@ public class GraphRepository : IGraphService
                 .Where(r => relationshipIds.Contains(r.Id) ||
                             (nodeIds.Contains(r.SourceNodeId) && nodeIds.Contains(r.TargetNodeId)))
                 .OrderBy(r => r.Id)
-                .Take(MaxTopologyRelationships)
+                .Take(MaxTopologyRelationships + 1)
                 .ToListAsync(cancellationToken);
+            if (relationshipsForNodes.Count > MaxTopologyRelationships)
+            {
+                relationshipsForNodes.RemoveAt(relationshipsForNodes.Count - 1);
+                result.IsTruncated = true;
+            }
 
             result.Nodes = await MapNodesAsync(nodes, cancellationToken);
             result.Relationships = relationshipsForNodes
@@ -130,8 +140,13 @@ public class GraphRepository : IGraphService
             .Include(r => r.TargetNode)
             .Where(r => initialIds.Contains(r.SourceNodeId) && initialIds.Contains(r.TargetNodeId))
             .OrderBy(r => r.Id)
-            .Take(MaxTopologyRelationships)
+            .Take(MaxTopologyRelationships + 1)
             .ToListAsync(cancellationToken);
+        if (initialRelationships.Count > MaxTopologyRelationships)
+        {
+            initialRelationships.RemoveAt(initialRelationships.Count - 1);
+            result.IsTruncated = true;
+        }
 
         result.Nodes = await MapNodesAsync(initialNodes, cancellationToken);
         result.Relationships = initialRelationships.Select(MapRelationshipDto).ToList();

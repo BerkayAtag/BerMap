@@ -125,6 +125,8 @@ const GlobalSearch: React.FC = () => {
       if (activeIndex >= 0 && results[activeIndex]) goToNode(results[activeIndex]);
       else goToInventorySearch();
     } else if (event.key === 'Escape') {
+      // Handled here: page-level Escape handlers (open panels) must ignore it.
+      event.preventDefault();
       setOpen(false);
       inputRef.current?.blur();
     }

@@ -11,7 +11,8 @@ export function useEscapeKey(active: boolean, handler: () => void): void {
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') handlerRef.current();
+      // A focused widget (search dropdown, menu) that consumed the key marks it handled.
+      if (event.key === 'Escape' && !event.defaultPrevented) handlerRef.current();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
