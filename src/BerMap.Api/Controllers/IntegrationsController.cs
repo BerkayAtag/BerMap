@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
 using BerMap.Contracts;
+using BerMap.Api.Security;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace BerMap.Api.Controllers;
@@ -43,6 +45,7 @@ public class IntegrationsController : ControllerBase
         return integration == null ? NotFound() : Ok(integration);
     }
 
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPost]
     public async Task<ActionResult<IntegrationDto>> Create(
         [FromBody] CreateIntegrationRequest request,
@@ -52,6 +55,7 @@ public class IntegrationsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { id = integration.Id }, integration);
     }
 
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<IntegrationDto>> Update(
         Guid id,
@@ -62,6 +66,7 @@ public class IntegrationsController : ControllerBase
         return integration == null ? NotFound() : Ok(integration);
     }
 
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
     {
@@ -70,6 +75,7 @@ public class IntegrationsController : ControllerBase
     }
 
     /// <summary>Tests a draft integration configuration without saving it.</summary>
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPost("test-connection")]
     public async Task<ActionResult<ConnectionTestResult>> TestDraft(
         [FromBody] TestConnectionRequest request,
@@ -79,6 +85,7 @@ public class IntegrationsController : ControllerBase
     }
 
     /// <summary>Tests a saved integration using the stored credential, or an override.</summary>
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPost("{id:guid}/test")]
     public async Task<ActionResult<ConnectionTestResult>> TestExisting(
         Guid id,
@@ -91,6 +98,7 @@ public class IntegrationsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPost("{id:guid}/discover")]
     public async Task<ActionResult<DiscoveryJobDto>> StartDiscovery(
         Guid id,
@@ -119,6 +127,7 @@ public class IntegrationsController : ControllerBase
         return job == null ? NotFound() : Ok(job);
     }
 
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
     [HttpPost("jobs/{jobId:guid}/cancel")]
     public async Task<IActionResult> CancelJob(Guid jobId, CancellationToken cancellationToken)
     {

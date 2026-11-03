@@ -4,6 +4,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
+using BerMap.Api.Security;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace BerMap.Api.Controllers;
@@ -60,6 +62,7 @@ public class InventoryController : ControllerBase
         return Ok(await _inventoryService.ListReviewsAsync(status, limit, cancellationToken));
     }
 
+    [Authorize(Policy = AuthorizationPolicies.Operate)]
     [HttpPost("reviews/{id:guid}/resolve")]
     public async Task<ActionResult<ReconciliationReviewDto>> ResolveReview(
         Guid id,

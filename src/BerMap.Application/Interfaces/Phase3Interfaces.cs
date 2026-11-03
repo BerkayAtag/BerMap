@@ -53,6 +53,19 @@ public interface IDiscoveryIngestionService
         Guid jobId,
         DiscoveryResult discovery,
         CancellationToken cancellationToken = default);
+
+    /// <param name="isCompleteSnapshot">
+    /// True only when <paramref name="discovery"/> is the complete, successful
+    /// view of the source. Anything not seen in it is then marked stale. Failed
+    /// or partial runs and intermediate collector batches must pass false, or a
+    /// single outage would stale the whole inventory of that integration.
+    /// </param>
+    Task<IngestionResult> IngestAsync(
+        Guid integrationId,
+        Guid jobId,
+        DiscoveryResult discovery,
+        bool isCompleteSnapshot,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IInventoryService

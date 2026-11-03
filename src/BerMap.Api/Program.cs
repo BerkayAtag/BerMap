@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using BerMap.Api.Health;
+using BerMap.Api.Security;
 using BerMap.Application.Interfaces;
 using BerMap.Application.Services;
 using BerMap.Application.Services.Reconciliation;
@@ -13,7 +15,9 @@ using BerMap.Infrastructure.Services;
 using BerMap.Integrations.ActiveDirectory;
 using BerMap.Integrations.VMware;
 using BerMap.Simulation;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
@@ -48,10 +52,47 @@ builder.Services.AddSingleton<IIntegrationAdapter, ActiveDirectoryAdapter>();
 builder.Services.AddSingleton<IIntegrationAdapter, VMwareAdapter>();
 builder.Services.AddSingleton<IIntegrationAdapterRegistry, IntegrationAdapterRegistry>();
 
-builder.Services.AddSingleton<ICredentialStore>(_ =>
+var configuredVaultDirectory = builder.Configuration["BerMap:CredentialVault:Directory"];
+// The default lives outside the application folder: a redeploy that replaces
+// the binaries must not regenerate the master key and orphan stored secrets.
+var defaultVaultDirectory = OperatingSystem.IsWindows()
+    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "BerMap", "vault")
+    : "/var/lib/bermap/vault";
+var vaultDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(configuredVaultDirectory)
+    ? defaultVaultDirectory
+    : configuredVaultDirectory, builder.Environment.ContentRootPath);
+
+builder.Services.AddSingleton<ICredentialStore>(_ => new CredentialStore(vaultDirectory));
+
+// Console sign-in: local accounts with PBKDF2 hashes and HMAC-signed bearer
+// tokens. Every API endpoint requires an authenticated user unless it is
+// explicitly marked [AllowAnonymous] (login, health probes, collector protocol).
+var tokenLifetime = TimeSpan.FromMinutes(Math.Clamp(
+    builder.Configuration.GetValue("BerMap:Auth:TokenLifetimeMinutes", 480), 5, 24 * 60));
+builder.Services.AddSingleton(new AccessTokenService(vaultDirectory, tokenLifetime));
+builder.Services
+    .AddAuthentication(BearerTokenAuthenticationHandler.SchemeName)
+    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, BearerTokenAuthenticationHandler>(
+        BearerTokenAuthenticationHandler.SchemeName, null);
+builder.Services.AddAuthorization(options =>
 {
-    var vaultDirectory = builder.Configuration["BerMap:CredentialVault:Directory"];
-    return new CredentialStore(string.IsNullOrWhiteSpace(vaultDirectory) ? null : vaultDirectory);
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+    options.AddPolicy(AuthorizationPolicies.ManageIntegrations, policy => policy.RequireRole(
+        nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
+        nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator)));
+    options.AddPolicy(AuthorizationPolicies.Operate, policy => policy.RequireRole(
+        nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
+        nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator),
+        nameof(BerMap.Domain.Enums.UserRole.InfrastructureOperator)));
+});
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
 builder.Services.AddScoped<IGraphService, GraphRepository>();
@@ -114,6 +155,8 @@ app.UseExceptionHandler(errorApp =>
 
         var (status, title, code) = exception switch
         {
+            IntegrationValidationException { Code: "DISCOVERY_ALREADY_ACTIVE" or "REVIEW_NOT_PENDING" } conflict => (
+                StatusCodes.Status409Conflict, conflict.Message, conflict.Code),
             IntegrationValidationException validation => (
                 StatusCodes.Status400BadRequest, validation.Message, validation.Code),
             ArgumentException argument => (
@@ -154,24 +197,37 @@ app.UseExceptionHandler(errorApp =>
 
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+    app.MapOpenApi().AllowAnonymous();
 }
 
-app.UseCors("OnPremises");
-app.UseRouting();
-app.MapControllers();
-app.MapHealthChecks("/healthz");
-app.MapHealthChecks("/healthz/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
-{
-    Predicate = check => check.Tags.Contains("ready")
-});
-app.MapHealthChecks("/healthz/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
-{
-    Predicate = _ => false
-});
+await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration, vaultDirectory, app.Logger);
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapFallbackToFile("index.html");
+
+app.UseRouting();
+app.UseCors("OnPremises");
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+app.MapHealthChecks("/healthz").AllowAnonymous();
+app.MapHealthChecks("/healthz/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+}).AllowAnonymous();
+app.MapHealthChecks("/healthz/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+}).AllowAnonymous();
+
+// Unknown /api routes must return 404 instead of the SPA shell.
+app.Map("/api/{**path}", () => Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "API endpoint not found."))
+    .AllowAnonymous();
+app.MapFallbackToFile("index.html").AllowAnonymous();
 
 app.Run();
+
+// Exposed for WebApplicationFactory-based integration tests.
+public partial class Program;

@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\BerMap.Api\BerMap.Api.csproj" />
     <ProjectReference Include="..\..\src\BerMap.Domain\BerMap.Domain.csproj" />
     <ProjectReference Include="..\..\src\BerMap.Application\BerMap.Application.csproj" />
     <ProjectReference Include="..\..\src\BerMap.Simulation\BerMap.Simulation.csproj" />

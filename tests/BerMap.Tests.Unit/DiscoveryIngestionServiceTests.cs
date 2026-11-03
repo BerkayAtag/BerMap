@@ -241,4 +241,86 @@ public class DiscoveryIngestionServiceTests
         Assert.Single(result.Warnings);
         Assert.Empty(await context.InfrastructureNodes.ToListAsync());
     }
+
+    [Fact]
+    public async Task Ingest_PartialRun_DoesNotMarkAbsentObjectsStale()
+    {
+        await using var context = CreateContext();
+        var integration = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(
+            integration.Id,
+            Guid.NewGuid(),
+            BuildBatch(integration.Id,
+                new DiscoveredNodeContract { ExternalId = "a", NodeType = "Computer", Name = "srv-a", FQDN = "srv-a.corp.local", SourceSystem = "ActiveDirectory" },
+                new DiscoveredNodeContract { ExternalId = "b", NodeType = "Computer", Name = "srv-b", FQDN = "srv-b.corp.local", SourceSystem = "ActiveDirectory" }));
+
+        // A later run whose computer search failed half-way only returns srv-a.
+        var partial = BuildBatch(integration.Id,
+            new DiscoveredNodeContract { ExternalId = "a", NodeType = "Computer", Name = "srv-a", FQDN = "srv-a.corp.local", SourceSystem = "ActiveDirectory" });
+        partial.Success = false;
+        partial.Status = "PartialSuccess";
+        partial.Errors.Add("Computer search timed out.");
+
+        var result = await service.IngestAsync(integration.Id, Guid.NewGuid(), partial, isCompleteSnapshot: false);
+
+        Assert.Equal(0, result.NodesMarkedStale);
+        Assert.Equal(0, result.SourceLinksStale);
+        Assert.False((await context.InfrastructureNodes.SingleAsync(n => n.Name == "srv-b")).IsStale);
+    }
+
+    [Fact]
+    public async Task Ingest_DefaultOverload_TreatsFailedResultAsIncomplete()
+    {
+        await using var context = CreateContext();
+        var integration = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(
+            integration.Id,
+            Guid.NewGuid(),
+            BuildBatch(integration.Id,
+                new DiscoveredNodeContract { ExternalId = "a", NodeType = "Computer", Name = "srv-a", FQDN = "srv-a.corp.local", SourceSystem = "ActiveDirectory" }));
+
+        var failed = BuildBatch(integration.Id);
+        failed.Success = false;
+        failed.Status = "Failed";
+
+        var result = await service.IngestAsync(integration.Id, Guid.NewGuid(), failed);
+
+        Assert.Equal(0, result.NodesMarkedStale);
+        Assert.False((await context.InfrastructureNodes.SingleAsync()).IsStale);
+    }
+
+    [Fact]
+    public async Task Ingest_RelationshipAlreadyOwnedByAnotherIntegration_IsReusedNotDuplicated()
+    {
+        await using var context = CreateContext();
+        var first = await SeedIntegrationAsync(context);
+        var second = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        DiscoveryResult Batch(Guid integrationId)
+        {
+            var batch = BuildBatch(integrationId,
+                new DiscoveredNodeContract { ExternalId = "dc", NodeType = "DomainController", Name = "dc01", FQDN = "dc01.corp.local", DomainSid = "S-1-5-21-1-1000", SourceSystem = "ActiveDirectory" },
+                new DiscoveredNodeContract { ExternalId = "dom", NodeType = "Domain", Name = "corp.local", FQDN = "corp.local", DomainSid = "S-1-5-21-1", SourceSystem = "ActiveDirectory" });
+            batch.Relationships.Add(new DiscoveredRelationshipContract
+            {
+                SourceExternalId = "dc",
+                TargetExternalId = "dom",
+                RelationshipType = "MemberOf",
+                ConfidenceLevel = "High",
+                SourceSystem = "ActiveDirectory"
+            });
+            return batch;
+        }
+
+        await service.IngestAsync(first.Id, Guid.NewGuid(), Batch(first.Id));
+        var result = await service.IngestAsync(second.Id, Guid.NewGuid(), Batch(second.Id));
+
+        Assert.Equal(0, result.RelationshipsCreated);
+        Assert.Equal(1, await context.InfrastructureRelationships.CountAsync());
+    }
 }

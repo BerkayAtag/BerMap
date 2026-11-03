@@ -27,12 +27,17 @@ public class CredentialStore : ICredentialStore
         if (File.Exists(keyPath))
         {
             _masterKey = File.ReadAllBytes(keyPath);
+            if (_masterKey.Length != 32)
+            {
+                throw new InvalidOperationException(
+                    $"Credential vault master key '{keyPath}' is corrupt (expected 32 bytes, found {_masterKey.Length}).");
+            }
         }
         else
         {
             _masterKey = new byte[32]; // 256-bit
             RandomNumberGenerator.Fill(_masterKey);
-            File.WriteAllBytes(keyPath, _masterKey);
+            WriteAtomically(keyPath, _masterKey);
         }
     }
 
@@ -47,7 +52,10 @@ public class CredentialStore : ICredentialStore
 
         using (var aesGcm = new AesGcm(_masterKey, 16))
         {
-            aesGcm.Encrypt(nonce, secretBytes, cipherText, tag);
+            // The key name is bound as associated data, so an .enc file copied
+            // over another integration's file fails to decrypt instead of
+            // silently handing out the wrong credential.
+            aesGcm.Encrypt(nonce, secretBytes, cipherText, tag, AssociatedData(key));
         }
 
         // Format: [12 bytes nonce] + [16 bytes tag] + [ciphertext]
@@ -58,7 +66,8 @@ public class CredentialStore : ICredentialStore
 
         var safeFileName = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".enc";
         var filePath = Path.Combine(_vaultPath, safeFileName);
-        await File.WriteAllBytesAsync(filePath, combined, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.Run(() => WriteAtomically(filePath, combined), cancellationToken);
     }
 
     public async Task<string?> RetrieveSecretAsync(string key, CancellationToken cancellationToken = default)
@@ -85,10 +94,55 @@ public class CredentialStore : ICredentialStore
 
         using (var aesGcm = new AesGcm(_masterKey, 16))
         {
-            aesGcm.Decrypt(nonce, cipherText, tag, plainText);
+            try
+            {
+                aesGcm.Decrypt(nonce, cipherText, tag, plainText, AssociatedData(key));
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // Secrets written before key binding was introduced have no
+                // associated data; anything else means the vault key changed.
+                try
+                {
+                    aesGcm.Decrypt(nonce, cipherText, tag, plainText);
+                }
+                catch (AuthenticationTagMismatchException ex)
+                {
+                    throw new InvalidOperationException(
+                        "The stored credential could not be decrypted. The vault master key may have been replaced; " +
+                        "re-enter the credential for this integration.", ex);
+                }
+            }
         }
 
         return Encoding.UTF8.GetString(plainText);
+    }
+
+    private static byte[] AssociatedData(string key) => Encoding.UTF8.GetBytes("bermap-credential:" + key);
+
+    /// <summary>
+    /// Writes to a temporary file and renames it into place so a crash never
+    /// leaves a truncated key or secret behind. On Unix the file is readable by
+    /// the service account only.
+    /// </summary>
+    private static void WriteAtomically(string path, byte[] content)
+    {
+        var temporaryPath = path + ".tmp";
+        using (var stream = OperatingSystem.IsWindows()
+                   ? new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None)
+                   : new FileStream(temporaryPath, new FileStreamOptions
+                   {
+                       Mode = FileMode.Create,
+                       Access = FileAccess.Write,
+                       Share = FileShare.None,
+                       UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+                   }))
+        {
+            stream.Write(content);
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(temporaryPath, path, overwrite: true);
     }
 
     public Task DeleteSecretAsync(string key, CancellationToken cancellationToken = default)

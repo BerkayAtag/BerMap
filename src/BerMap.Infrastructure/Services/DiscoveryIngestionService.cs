@@ -39,10 +39,20 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         _logger = logger;
     }
 
+    public Task<IngestionResult> IngestAsync(
+        Guid integrationId,
+        Guid jobId,
+        DiscoveryResult discovery,
+        CancellationToken cancellationToken = default) =>
+        IngestAsync(integrationId, jobId, discovery,
+            discovery.Success && string.Equals(discovery.Status, "Completed", StringComparison.OrdinalIgnoreCase),
+            cancellationToken);
+
     public async Task<IngestionResult> IngestAsync(
         Guid integrationId,
         Guid jobId,
         DiscoveryResult discovery,
+        bool isCompleteSnapshot,
         CancellationToken cancellationToken = default)
     {
         var integration = await _context.Integrations
@@ -190,6 +200,22 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             }
         }
 
+        // The (source, target, type) key is unique across all integrations. Two
+        // sources that reconcile onto the same nodes (or a re-created
+        // integration) would otherwise insert a duplicate and fail the run.
+        var touchedNodeIds = externalToNodeId.Values.Distinct().ToList();
+        if (touchedNodeIds.Count > 0 && discovery.Relationships.Count > 0)
+        {
+            var foreignRelationships = await _context.InfrastructureRelationships
+                .Where(r => r.IntegrationId != integrationId &&
+                            touchedNodeIds.Contains(r.SourceNodeId) &&
+                            touchedNodeIds.Contains(r.TargetNodeId))
+                .ToListAsync(cancellationToken);
+
+            foreach (var foreign in foreignRelationships)
+                relationshipIndex.TryAdd((foreign.SourceNodeId, foreign.TargetNodeId, foreign.RelationshipType), foreign);
+        }
+
         foreach (var relationship in discovery.Relationships)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -253,7 +279,8 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         }
 
         // Source links that were not returned by this full discovery become stale.
-        foreach (var link in links.Where(l => !seenLinkIds.Contains(l.Id)))
+        // A partial view proves nothing about absent objects, so skip it then.
+        foreach (var link in links.Where(l => isCompleteSnapshot && !seenLinkIds.Contains(l.Id)))
         {
             if (!link.IsStale)
             {
@@ -264,7 +291,9 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         }
 
         // A node is stale only when every source link that references it is stale.
-        var affectedNodeIds = links.Select(l => l.NodeId).Distinct().ToList();
+        var affectedNodeIds = isCompleteSnapshot
+            ? links.Select(l => l.NodeId).Distinct().ToList()
+            : new List<Guid>();
         if (affectedNodeIds.Count > 0)
         {
             var allLinks = await _context.NodeSourceLinks
@@ -295,7 +324,8 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
 
         // Relationships belonging to this integration that were not observed in
         // this run are marked stale, but retained for historical graph context.
-        foreach (var relationship in existingRelationships.Where(r => r.LastSeenJobId != jobId && !r.IsStale))
+        foreach (var relationship in existingRelationships.Where(r =>
+                     isCompleteSnapshot && r.LastSeenJobId != jobId && !r.IsStale))
         {
             relationship.IsStale = true;
             relationship.StaleSince = now;

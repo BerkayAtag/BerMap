@@ -70,6 +70,9 @@ public class GraphQueryResultDto
 {
     public List<InfrastructureNodeDto> Nodes { get; set; } = new();
     public List<InfrastructureRelationshipDto> Relationships { get; set; } = new();
+
+    /// <summary>True when the graph had more nodes than the response cap.</summary>
+    public bool IsTruncated { get; set; }
 }
 
 public class SimulationRunRequest

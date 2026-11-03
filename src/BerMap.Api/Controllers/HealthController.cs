@@ -3,12 +3,15 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BerMap.Api.Security;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace BerMap.Api.Controllers;
 
 [ApiController]
+[AllowAnonymous]
 [Route("[controller]")]
 public class HealthController : ControllerBase
 {

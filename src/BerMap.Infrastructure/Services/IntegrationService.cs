@@ -499,9 +499,20 @@ public sealed class IntegrationService : IIntegrationService
         {
             return await adapter.TestConnectionAsync(context, cancellationToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // An HTTP/LDAP timeout surfaces as a cancellation the caller did not request.
+            return new ConnectionTestResult
+            {
+                Success = false,
+                Message = "The source system did not respond within the connection timeout.",
+                ErrorCode = "CONNECTION_TIMEOUT",
+                ErrorDetail = ex.Message
+            };
         }
         catch (AdapterConfigurationException ex)
         {

@@ -90,10 +90,6 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             return;
         }
 
-        var secret = string.IsNullOrWhiteSpace(integration.CredentialReference)
-            ? null
-            : await _credentialStore.RetrieveSecretAsync(integration.CredentialReference, cancellationToken);
-
         job.Status = DiscoveryJobStatus.Running;
         job.StartedAt = DateTime.UtcNow;
         job.ProgressPercent = 1;
@@ -109,6 +105,12 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         ActiveJobs[job.Id] = linkedCts;
 
+        // The integration's operation timeout bounds the whole run, so a hung
+        // source system cannot keep the job (and the integration) busy forever.
+        var operationTimeout = TimeSpan.FromSeconds(Math.Max(30, integration.TimeoutSeconds));
+        using var timeoutCts = new CancellationTokenSource(operationTimeout);
+        using var runCts = CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token, timeoutCts.Token);
+
         var progressChannel = Channel.CreateBounded<DiscoveryProgress>(new BoundedChannelOptions(1)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -116,12 +118,16 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             SingleWriter = false
         });
 
-        var progressTask = ConsumeProgressAsync(_scopeFactory, progressChannel.Reader, job.Id, linkedCts.Token);
+        var progressTask = ConsumeProgressAsync(_scopeFactory, progressChannel.Reader, job.Id, runCts.Token);
         var progress = new Progress<DiscoveryProgress>(p => progressChannel.Writer.TryWrite(p));
         var stopwatch = Stopwatch.StartNew();
 
         try
         {
+            var secret = string.IsNullOrWhiteSpace(integration.CredentialReference)
+                ? null
+                : await _credentialStore.RetrieveSecretAsync(integration.CredentialReference, runCts.Token);
+
             var executionContext = new AdapterExecutionContext
             {
                 IntegrationId = integration.Id,
@@ -129,18 +135,34 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
                 ConfigurationJson = integration.ConfigurationJson,
                 Secret = secret,
                 ConnectionTimeout = TimeSpan.FromSeconds(30),
-                OperationTimeout = TimeSpan.FromSeconds(integration.TimeoutSeconds),
+                OperationTimeout = operationTimeout,
                 MaxConcurrency = Math.Max(1, adapter.GetCapabilities().MaxConcurrency)
             };
 
-            var discovery = await adapter.DiscoverAsync(executionContext, progress, linkedCts.Token);
+            var discovery = await adapter.DiscoverAsync(executionContext, progress, runCts.Token);
             discovery.IntegrationId = integration.Id;
             stopwatch.Stop();
 
-            var ingestionResult = await ingestion.IngestAsync(integration.Id, job.Id, discovery, linkedCts.Token);
+            // A failed run (connection/authentication error, nothing collected)
+            // is not ingested at all; a partial run is ingested without marking
+            // absent objects stale.
+            var nothingCollected = discovery.Nodes.Count == 0 && discovery.Relationships.Count == 0;
+            if (!discovery.Success && nothingCollected)
+            {
+                var reason = discovery.Errors.FirstOrDefault() ?? "Discovery returned no data.";
+                await FailJobAsync(context, audit, job, integration, "DISCOVERY_FAILED", reason, CancellationToken.None,
+                    discovery.Errors, discovery.Warnings);
+                return;
+            }
 
-            var errors = discovery.Errors.Concat(ingestionResult.Warnings).Distinct().ToList();
-            var warnings = discovery.Warnings.Distinct().ToList();
+            var isCompleteSnapshot = discovery.Success &&
+                                     discovery.Errors.Count == 0 &&
+                                     string.Equals(discovery.Status, "Completed", StringComparison.OrdinalIgnoreCase);
+            var ingestionResult = await ingestion.IngestAsync(
+                integration.Id, job.Id, discovery, isCompleteSnapshot, runCts.Token);
+
+            var errors = discovery.Errors.Distinct().ToList();
+            var warnings = discovery.Warnings.Concat(ingestionResult.Warnings).Distinct().ToList();
 
             job.EntitiesDiscovered = discovery.Nodes.Count;
             job.RelationshipsDiscovered = discovery.Relationships.Count;
@@ -218,9 +240,16 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
                 "Discovery job {JobId} finished with {Status}: {Nodes} nodes, {Relationships} relationships, {Errors} errors",
                 job.Id, job.Status, job.EntitiesDiscovered, job.RelationshipsDiscovered, errors.Count);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !linkedCts.IsCancellationRequested)
         {
             stopwatch.Stop();
+            await FailJobAsync(context, audit, job, integration, "DISCOVERY_TIMEOUT",
+                $"Discovery did not finish within {operationTimeout.TotalSeconds:0} seconds.", CancellationToken.None);
+        }
+        catch (OperationCanceledException) when (linkedCts.IsCancellationRequested)
+        {
+            stopwatch.Stop();
+            (job, integration) = await ReloadAsync(context, job, integration);
             job.Status = DiscoveryJobStatus.Cancelled;
             job.CompletedAt = DateTime.UtcNow;
             job.DurationMs = (long)stopwatch.Elapsed.TotalMilliseconds;
@@ -281,15 +310,18 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             {
                 using var progressScope = scopeFactory.CreateScope();
                 var context = progressScope.ServiceProvider.GetRequiredService<BerMapDbContext>();
-                var job = await context.DiscoveryJobs.FirstOrDefaultAsync(j => j.Id == jobId, cancellationToken);
-                if (job == null || job.Status is not (DiscoveryJobStatus.Queued or DiscoveryJobStatus.Running))
-                    continue;
-
-                job.ProgressPercent = Math.Clamp(latest.Percent, 0, 100);
-                job.CurrentPhase = latest.Phase;
-                job.CurrentMessage = latest.Message;
-                job.UpdatedAt = DateTime.UtcNow;
-                await context.SaveChangesAsync(cancellationToken);
+                // A single conditional UPDATE, so a late progress report can never
+                // overwrite the phase/message of a job that already finished.
+                var percent = Math.Clamp(latest.Percent, 0, 100);
+                var now = DateTime.UtcNow;
+                await context.DiscoveryJobs
+                    .Where(j => j.Id == jobId &&
+                                (j.Status == DiscoveryJobStatus.Queued || j.Status == DiscoveryJobStatus.Running))
+                    .ExecuteUpdateAsync(set => set
+                        .SetProperty(j => j.ProgressPercent, percent)
+                        .SetProperty(j => j.CurrentPhase, latest.Phase)
+                        .SetProperty(j => j.CurrentMessage, latest.Message)
+                        .SetProperty(j => j.UpdatedAt, now), cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -304,6 +336,20 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
         }
     }
 
+    /// <summary>
+    /// Drops whatever a failed ingestion left in the change tracker (half-built
+    /// graph, entities that violated a constraint) so recording the terminal
+    /// job state cannot fail for the same reason, or persist a partial graph.
+    /// </summary>
+    private static async Task<(DiscoveryJob Job, Integration Integration)> ReloadAsync(
+        BerMapDbContext context, DiscoveryJob job, Integration integration)
+    {
+        context.ChangeTracker.Clear();
+        var reloadedJob = await context.DiscoveryJobs.FirstAsync(j => j.Id == job.Id, CancellationToken.None);
+        var reloadedIntegration = await context.Integrations.FirstAsync(i => i.Id == integration.Id, CancellationToken.None);
+        return (reloadedJob, reloadedIntegration);
+    }
+
     private static async Task FailJobAsync(
         BerMapDbContext context,
         IAuditService audit,
@@ -311,14 +357,20 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
         Integration integration,
         string errorCode,
         string errorMessage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IEnumerable<string>? errors = null,
+        IEnumerable<string>? warnings = null)
     {
+        (job, integration) = await ReloadAsync(context, job, integration);
+
         job.Status = DiscoveryJobStatus.Failed;
         job.CompletedAt = DateTime.UtcNow;
         job.ProgressPercent = 100;
         job.CurrentPhase = "Failed";
         job.CurrentMessage = errorMessage;
-        job.ErrorsJson = JsonSerializer.Serialize(new[] { $"{errorCode}: {errorMessage}" });
+        job.ErrorsJson = JsonSerializer.Serialize(
+            new[] { $"{errorCode}: {errorMessage}" }.Concat(errors ?? Enumerable.Empty<string>()).Distinct());
+        job.WarningsJson = JsonSerializer.Serialize(warnings ?? Enumerable.Empty<string>());
         job.DurationMs = job.CompletedAt.HasValue
             ? (long)(job.CompletedAt.Value - job.StartedAt).TotalMilliseconds
             : null;

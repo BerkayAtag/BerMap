@@ -74,13 +74,17 @@ public class GraphRepository : IGraphService
                 frontier = next;
             }
 
+            // The center node is always part of the result, even when the
+            // neighbourhood is larger than the node cap.
             var nodes = await _context.InfrastructureNodes
                 .AsNoTracking()
-                .Where(n => visited.Contains(n.Id))
+                .Where(n => visited.Contains(n.Id) && n.Id != center.Id)
                 .OrderBy(n => n.NodeType)
                 .ThenBy(n => n.Name)
-                .Take(MaxTopologyNodes)
+                .Take(MaxTopologyNodes - 1)
                 .ToListAsync(cancellationToken);
+            nodes.Insert(0, center);
+            result.IsTruncated = visited.Count > nodes.Count;
 
             var nodeIds = nodes.Select(n => n.Id).ToHashSet();
             var relationshipsForNodes = await _context.InfrastructureRelationships
@@ -106,8 +110,14 @@ public class GraphRepository : IGraphService
             .AsNoTracking()
             .OrderBy(n => n.NodeType)
             .ThenBy(n => n.Name)
-            .Take(100)
+            .Take(MaxTopologyNodes + 1)
             .ToListAsync(cancellationToken);
+
+        if (initialNodes.Count > MaxTopologyNodes)
+        {
+            initialNodes.RemoveAt(initialNodes.Count - 1);
+            result.IsTruncated = true;
+        }
 
         if (initialNodes.Count == 0)
             return result;
@@ -189,15 +199,7 @@ public class GraphRepository : IGraphService
 
         return nodes.Select(node =>
         {
-            Dictionary<string, string> properties;
-            try
-            {
-                properties = JsonSerializer.Deserialize<Dictionary<string, string>>(node.PropertiesJson) ?? new();
-            }
-            catch (JsonException)
-            {
-                properties = new();
-            }
+            var properties = ParseProperties(node.PropertiesJson);
 
             if (!sourcesByNode.TryGetValue(node.Id, out var sources))
                 sources = new List<string>();
@@ -223,6 +225,41 @@ public class GraphRepository : IGraphService
                 Properties = properties
             };
         }).ToList();
+    }
+
+    /// <summary>
+    /// Node properties mix scalars written by adapters with arrays written by
+    /// reconciliation (e.g. <c>_sourceSystems</c>), so they cannot be read as a
+    /// string dictionary. Scalars keep their value; arrays/objects keep raw JSON.
+    /// </summary>
+    internal static Dictionary<string, string> ParseProperties(string? json)
+    {
+        var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(json))
+            return properties;
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return properties;
+
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                properties[property.Name] = property.Value.ValueKind switch
+                {
+                    JsonValueKind.String => property.Value.GetString() ?? string.Empty,
+                    JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
+                    _ => property.Value.GetRawText()
+                };
+            }
+        }
+        catch (JsonException)
+        {
+            // Corrupt metadata must not hide the node itself.
+        }
+
+        return properties;
     }
 
     private static InfrastructureRelationshipDto MapRelationshipDto(InfrastructureRelationship rel)

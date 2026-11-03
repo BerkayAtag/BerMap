@@ -4,6 +4,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Services;
+using BerMap.Api.Security;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace BerMap.Api.Controllers;
@@ -25,12 +27,13 @@ public class SnapshotsController : ControllerBase
         return Ok(await _snapshotService.ListSnapshotsAsync(cancellationToken));
     }
 
+    [Authorize(Policy = AuthorizationPolicies.Operate)]
     [HttpPost]
     public async Task<ActionResult<SnapshotSummaryDto>> Create(
         [FromBody] CreateSnapshotRequest request,
         CancellationToken cancellationToken)
     {
-        var createdBy = !string.IsNullOrWhiteSpace(request.CreatedBy) ? request.CreatedBy! : this.GetActor();
+        var createdBy = this.GetActor();
         var snapshot = await _snapshotService.CreateSnapshotAsync(request, createdBy, cancellationToken);
         return CreatedAtAction(nameof(Get), new { id = snapshot.Id }, snapshot);
     }

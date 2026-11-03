@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Infrastructure.Data;
@@ -7,8 +8,8 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 namespace BerMap.Api.Health;
 
 /// <summary>
-/// Readiness check that verifies the API can actually reach PostgreSQL. It does
-/// not create or migrate the schema.
+/// Readiness check that verifies the API can reach PostgreSQL and that the
+/// schema is current. It does not create or migrate the schema itself.
 /// </summary>
 public sealed class DatabaseHealthCheck : IHealthCheck
 {
@@ -25,10 +26,15 @@ public sealed class DatabaseHealthCheck : IHealthCheck
     {
         try
         {
-            var canConnect = await _context.Database.CanConnectAsync(cancellationToken);
-            return canConnect
+            if (!await _context.Database.CanConnectAsync(cancellationToken))
+                return HealthCheckResult.Unhealthy("PostgreSQL connection failed.");
+
+            // Reachable but not on the current schema is not ready: every
+            // request would fail with "relation does not exist".
+            var pending = (await _context.Database.GetPendingMigrationsAsync(cancellationToken)).ToList();
+            return pending.Count == 0
                 ? HealthCheckResult.Healthy("PostgreSQL connection succeeded.")
-                : HealthCheckResult.Unhealthy("PostgreSQL connection failed.");
+                : HealthCheckResult.Unhealthy($"Database schema is out of date ({pending.Count} pending migration(s)).");
         }
         catch (Exception ex)
         {

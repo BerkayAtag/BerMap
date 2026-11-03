@@ -81,6 +81,7 @@ public sealed class InventoryService : IInventoryService
         var totalCount = await query.CountAsync(cancellationToken);
         var nodes = await query
             .OrderBy(n => n.Name)
+            .ThenBy(n => n.Id)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
