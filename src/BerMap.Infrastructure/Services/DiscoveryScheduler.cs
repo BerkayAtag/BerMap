@@ -108,7 +108,9 @@ public sealed class DiscoveryScheduler
 
         var integrations = await _context.Integrations
             .AsNoTracking()
-            .Where(i => i.IsEnabled && i.DeletedAt == null && i.ScheduleCron != string.Empty)
+            // Collector-managed integrations are discovered by their collector,
+            // never by the server.
+            .Where(i => i.IsEnabled && !i.CollectorManaged && i.DeletedAt == null && i.ScheduleCron != string.Empty)
             .Select(i => new { i.Id, i.Name, i.ScheduleCron, i.CreatedAt })
             .ToListAsync(cancellationToken);
 

@@ -61,8 +61,12 @@ public sealed class DashboardService : IDashboardService
             .MaxAsync(j => j.CompletedAt, cancellationToken);
         var lastDiscoveryAt = new[] { lastNodeSeen, lastJobCompleted }.Where(d => d.HasValue).Max();
 
+        // Only real changes, newest first: a node's first discovery, or a
+        // status transition recorded by ingestion. A node that is merely
+        // re-seen by the next discovery run is not a change.
         var recentNodes = await nodes
-            .OrderByDescending(n => n.LastSeen)
+            .OrderByDescending(n => n.StatusChangedAt ?? n.FirstSeen)
+            .ThenBy(n => n.Id)
             .Take(10)
             .Select(n => new
             {
@@ -72,23 +76,19 @@ public sealed class DashboardService : IDashboardService
                 n.DiscoverySource,
                 n.Status,
                 n.FirstSeen,
-                n.LastSeen
+                n.StatusChangedAt
             })
             .ToListAsync(cancellationToken);
 
-        var recentChanges = recentNodes.Select(n =>
+        var recentChanges = recentNodes.Select(n => new RecentChangeDto
         {
-            var discovered = n.FirstSeen >= discoveryWindow && n.FirstSeen >= n.LastSeen.AddMinutes(-5);
-            return new RecentChangeDto
-            {
-                Id = n.Id,
-                EntityName = n.Name,
-                EntityType = n.NodeType.ToString(),
-                ChangeType = discovered ? "Discovered" : "Status Changed",
-                Source = n.DiscoverySource,
-                Status = n.Status,
-                Timestamp = n.LastSeen
-            };
+            Id = n.Id,
+            EntityName = n.Name,
+            EntityType = n.NodeType.ToString(),
+            ChangeType = n.StatusChangedAt.HasValue ? "StatusChanged" : "Discovered",
+            Source = n.DiscoverySource,
+            Status = n.Status,
+            Timestamp = n.StatusChangedAt ?? n.FirstSeen
         }).ToList();
 
         return new DashboardSummaryDto

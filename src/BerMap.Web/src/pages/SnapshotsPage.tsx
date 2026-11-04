@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -222,7 +223,23 @@ export const SnapshotsPage: React.FC = () => {
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [detailSnapshotId, setDetailSnapshotId] = useState<string | null>(null);
+  // The open snapshot lives in the URL (?id=) so other pages can deep-link to it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const detailSnapshotId = searchParams.get('id') || null;
+  const setDetailSnapshotId = useCallback(
+    (id: string | null) => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (id) next.set('id', id);
+          else next.delete('id');
+          return next;
+        },
+        { replace: !id },
+      );
+    },
+    [setSearchParams],
+  );
   const [isDiffOpen, setIsDiffOpen] = useState(false);
   const [compareA, setCompareA] = useState('');
   const [compareB, setCompareB] = useState('');
@@ -264,7 +281,12 @@ export const SnapshotsPage: React.FC = () => {
   const snapshotsError = snapshotsQuery.isError
     ? getErrorMessage(snapshotsQuery.error)
     : null;
-  const graphError = graphQuery.isError ? getErrorMessage(graphQuery.error) : null;
+  // A deep link (?id=) can point at a snapshot that does not exist (any more).
+  const graphError = graphQuery.isError
+    ? (graphQuery.error as { status?: number } | null)?.status === 404
+      ? (isTr ? 'Bu snapshot bulunamadı. Bağlantı eski veya hatalı olabilir.' : 'This snapshot was not found. The link may be outdated or wrong.')
+      : getErrorMessage(graphQuery.error)
+    : null;
 
   const openCreate = () => {
     setNewName(defaultSnapshotName());

@@ -18,6 +18,11 @@ public class SimulationsController : ControllerBase
         _simulationEngine = simulationEngine;
     }
 
+    /// <summary>
+    /// Runs one scenario against the live graph. A missing target or a scenario
+    /// that cannot fail the target's node type is rejected with 400
+    /// (invalid_simulation); an unknown target node returns 404.
+    /// </summary>
     [HttpPost("run")]
     public async Task<ActionResult<ImpactAnalysisResultDto>> RunSimulation([FromBody] SimulationRunRequest request, CancellationToken cancellationToken = default)
     {

@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
+using BerMap.Application.Services.Integrations;
 using BerMap.Application.Services.Scheduling;
 using BerMap.Contracts;
 using BerMap.Domain.Entities;
@@ -85,7 +86,23 @@ public sealed class IntegrationService : IIntegrationService
     {
         ValidateName(request.Name);
         var adapter = RequireAdapter(request.AdapterType);
-        var configuration = BuildConfiguration(request.Configuration, adapter, rejectSecrets: true);
+        var configuration = BuildConfiguration(request.Configuration ?? new(), adapter, rejectSecrets: true);
+        ValidateServer(configuration);
+
+        // A collector-managed integration is configured on the collector: the
+        // server never connects to the source, so it needs neither the
+        // connection fields nor the credential.
+        if (!request.CollectorManaged)
+        {
+            ValidateRequiredConfiguration(configuration, adapter);
+            if (adapter.ConfigurationSchema.SecretFields.Count > 0 && string.IsNullOrWhiteSpace(request.Secret))
+            {
+                throw new IntegrationValidationException(
+                    "SECRET_REQUIRED",
+                    $"The {adapter.DisplayName} adapter needs a credential ({string.Join(", ", adapter.ConfigurationSchema.SecretFields)}).");
+            }
+        }
+
         ValidateSchedule(request.ScheduleCron);
 
         var id = Guid.NewGuid();
@@ -96,8 +113,9 @@ public sealed class IntegrationService : IIntegrationService
             Description = request.Description?.Trim() ?? string.Empty,
             AdapterType = adapter.AdapterType,
             AdapterVersion = adapter.Version,
-            Status = IntegrationStatus.Inactive,
+            Status = IntegrationStatusRules.Resting(request.IsEnabled, null),
             IsEnabled = request.IsEnabled,
+            CollectorManaged = request.CollectorManaged,
             ConfigurationJson = configuration.ToJsonString(),
             ConfigurationVersion = 1,
             CredentialReference = string.Empty,
@@ -117,7 +135,7 @@ public sealed class IntegrationService : IIntegrationService
         await _context.SaveChangesAsync(cancellationToken);
         await _auditService.LogAsync(
             actor, actor, "IntegrationCreated", nameof(Integration), integration.Id.ToString(),
-            JsonSerializer.Serialize(new { integration.AdapterType, integration.Name }),
+            JsonSerializer.Serialize(new { integration.AdapterType, integration.Name, integration.CollectorManaged, integration.IsEnabled }),
             GetIpAddress(), true, cancellationToken);
 
         return MapIntegration(integration, null);
@@ -137,38 +155,99 @@ public sealed class IntegrationService : IIntegrationService
 
         var adapter = RequireAdapter(integration.AdapterType);
 
+        // Audit details record what changed. Configuration values are
+        // non-secret by construction; secrets are only reported as rotated or
+        // cleared, never with a value.
+        var changes = new Dictionary<string, object?>();
+        void Track<T>(string field, T from, T to)
+        {
+            if (!EqualityComparer<T>.Default.Equals(from, to))
+                changes[field] = new { from, to };
+        }
+
+        var collectorManaged = request.CollectorManaged ?? integration.CollectorManaged;
+
         if (request.Name != null)
         {
             ValidateName(request.Name);
+            Track("name", integration.Name, request.Name.Trim());
             integration.Name = request.Name.Trim();
         }
 
         if (request.Description != null)
+        {
+            Track("description", integration.Description, request.Description.Trim());
             integration.Description = request.Description.Trim();
+        }
 
+        List<string> configurationKeysChanged = new();
         if (request.Configuration != null)
         {
             var configuration = BuildConfiguration(request.Configuration, adapter, rejectSecrets: true);
-            integration.ConfigurationJson = configuration.ToJsonString();
-            integration.ConfigurationVersion++;
+            ValidateServer(configuration);
+            if (!collectorManaged)
+                ValidateRequiredConfiguration(configuration, adapter);
+
+            configurationKeysChanged = ChangedKeys(integration.ConfigurationJson, configuration);
+            if (configurationKeysChanged.Count > 0)
+            {
+                integration.ConfigurationJson = configuration.ToJsonString();
+                integration.ConfigurationVersion++;
+            }
         }
 
         if (request.ScheduleCron != null)
         {
             ValidateSchedule(request.ScheduleCron);
+            Track("scheduleCron", integration.ScheduleCron, request.ScheduleCron.Trim());
             integration.ScheduleCron = request.ScheduleCron.Trim();
         }
 
         if (request.TimeoutSeconds.HasValue)
-            integration.TimeoutSeconds = ClampTimeout(request.TimeoutSeconds.Value);
-
-        if (request.IsEnabled.HasValue)
         {
+            var timeout = ClampTimeout(request.TimeoutSeconds.Value);
+            Track("timeoutSeconds", integration.TimeoutSeconds, timeout);
+            integration.TimeoutSeconds = timeout;
+        }
+
+        var secretRotated = !request.ClearSecret && !string.IsNullOrWhiteSpace(request.Secret);
+        var secretCleared = request.ClearSecret && !string.IsNullOrWhiteSpace(integration.CredentialReference);
+
+        if (collectorManaged != integration.CollectorManaged)
+        {
+            // Switching back to server-side discovery needs a credential the
+            // server can use.
+            if (!collectorManaged &&
+                adapter.ConfigurationSchema.SecretFields.Count > 0 &&
+                !secretRotated &&
+                (request.ClearSecret || string.IsNullOrWhiteSpace(integration.CredentialReference)))
+            {
+                throw new IntegrationValidationException(
+                    "SECRET_REQUIRED",
+                    $"The {adapter.DisplayName} adapter needs a credential before the server can discover it.");
+            }
+
+            if (!collectorManaged)
+                ValidateRequiredConfiguration(ParseConfiguration(integration.ConfigurationJson), adapter);
+
+            Track("collectorManaged", integration.CollectorManaged, collectorManaged);
+            integration.CollectorManaged = collectorManaged;
+
+            // Errors of server-side tests say nothing about collector-fed data
+            // (and vice versa); the next test or batch reports fresh health.
+            integration.LastError = string.Empty;
+            integration.LastErrorAt = null;
+            integration.LastTestSuccess = null;
+            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
+        }
+
+        if (request.IsEnabled.HasValue && request.IsEnabled.Value != integration.IsEnabled)
+        {
+            Track("isEnabled", integration.IsEnabled, request.IsEnabled.Value);
             integration.IsEnabled = request.IsEnabled.Value;
-            if (!integration.IsEnabled)
-                integration.Status = IntegrationStatus.Inactive;
-            else if (integration.Status == IntegrationStatus.Inactive)
-                integration.Status = IntegrationStatus.Active;
+
+            // Re-enabling must not hide a failed test or discovery.
+            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
         }
 
         if (request.ClearSecret)
@@ -177,19 +256,27 @@ public sealed class IntegrationService : IIntegrationService
                 await _credentialStore.DeleteSecretAsync(integration.CredentialReference, cancellationToken);
             integration.CredentialReference = string.Empty;
         }
-        else if (!string.IsNullOrWhiteSpace(request.Secret))
+        else if (secretRotated)
         {
             integration.CredentialReference = string.IsNullOrWhiteSpace(integration.CredentialReference)
                 ? CredentialKey(id)
                 : integration.CredentialReference;
-            await _credentialStore.StoreSecretAsync(integration.CredentialReference, request.Secret, cancellationToken);
+            await _credentialStore.StoreSecretAsync(integration.CredentialReference, request.Secret!, cancellationToken);
         }
 
         integration.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync(cancellationToken);
         await _auditService.LogAsync(
             actor, actor, "IntegrationUpdated", nameof(Integration), integration.Id.ToString(),
-            JsonSerializer.Serialize(new { integration.Name, integration.ConfigurationVersion }),
+            JsonSerializer.Serialize(new
+            {
+                integration.Name,
+                integration.ConfigurationVersion,
+                changes,
+                configurationKeysChanged,
+                secretRotated,
+                secretCleared
+            }),
             GetIpAddress(), true, cancellationToken);
 
         var lastStarts = await LastJobStartsAsync(new List<Guid> { integration.Id }, cancellationToken);
@@ -215,22 +302,22 @@ public sealed class IntegrationService : IIntegrationService
             integration.CredentialReference = string.Empty;
         }
 
-        var queuedJobs = await _context.DiscoveryJobs
-            .Where(j => j.IntegrationId == id && j.Status == DiscoveryJobStatus.Queued)
-            .ToListAsync(cancellationToken);
-
-        foreach (var job in queuedJobs)
-        {
-            job.Status = DiscoveryJobStatus.Cancelled;
-            job.CompletedAt = DateTime.UtcNow;
-            job.CurrentPhase = "Cancelled";
-            job.CurrentMessage = "Integration was deleted before the job started.";
-        }
+        var cancelledJobs = await CloseJobsOfDeletedIntegrationAsync(id, cancellationToken);
+        var cleanup = await RetireDiscoveredDataAsync(id, cancellationToken);
+        integration.DiscoveredEntitiesCount = 0;
 
         await _context.SaveChangesAsync(cancellationToken);
         await _auditService.LogAsync(
             actor, actor, "IntegrationDeleted", nameof(Integration), id.ToString(),
-            JsonSerializer.Serialize(new { integration.Name, integration.AdapterType }),
+            JsonSerializer.Serialize(new
+            {
+                integration.Name,
+                integration.AdapterType,
+                jobsClosed = cancelledJobs,
+                sourceLinksStale = cleanup.Links,
+                nodesMarkedStale = cleanup.Nodes,
+                relationshipsMarkedStale = cleanup.Relationships
+            }),
             GetIpAddress(), true, cancellationToken);
 
         return true;
@@ -241,7 +328,8 @@ public sealed class IntegrationService : IIntegrationService
         CancellationToken cancellationToken = default)
     {
         var adapter = RequireAdapter(request.AdapterType);
-        var configuration = BuildConfiguration(request.Configuration, adapter, rejectSecrets: true);
+        var configuration = BuildConfiguration(request.Configuration ?? new(), adapter, rejectSecrets: true);
+        ValidateServer(configuration);
 
         var context = new AdapterExecutionContext
         {
@@ -269,6 +357,8 @@ public sealed class IntegrationService : IIntegrationService
         if (integration == null)
             return null;
 
+        RejectCollectorManaged(integration);
+
         var adapter = RequireAdapter(integration.AdapterType);
         var secret = secretOverride;
         if (string.IsNullOrWhiteSpace(secret) && !string.IsNullOrWhiteSpace(integration.CredentialReference))
@@ -281,9 +371,8 @@ public sealed class IntegrationService : IIntegrationService
         integration.LastTestSuccess = result.Success;
         integration.LastError = result.Success ? string.Empty : $"{result.ErrorCode}: {result.ErrorDetail}";
         integration.LastErrorAt = result.Success ? null : DateTime.UtcNow;
-        integration.Status = result.Success
-            ? (integration.IsEnabled ? IntegrationStatus.Active : IntegrationStatus.Inactive)
-            : IntegrationStatus.Error;
+        integration.Status = IntegrationStatusRules.AfterRun(
+            integration.IsEnabled, result.Success ? IntegrationStatus.Active : IntegrationStatus.Error);
         integration.UpdatedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync(cancellationToken);
@@ -312,6 +401,8 @@ public sealed class IntegrationService : IIntegrationService
 
         if (integration == null)
             return null;
+
+        RejectCollectorManaged(integration);
 
         if (!integration.IsEnabled)
             throw new IntegrationValidationException("INTEGRATION_DISABLED", "This integration is disabled.");
@@ -406,13 +497,13 @@ public sealed class IntegrationService : IIntegrationService
         return job == null ? null : MapJob(job, job.Integration);
     }
 
-    public async Task<bool> CancelJobAsync(Guid jobId, string actor, CancellationToken cancellationToken = default)
+    public async Task<CancelJobOutcome> CancelJobAsync(Guid jobId, string actor, CancellationToken cancellationToken = default)
     {
         var job = await _context.DiscoveryJobs
             .FirstOrDefaultAsync(j => j.Id == jobId, cancellationToken);
 
         if (job == null)
-            return false;
+            return CancelJobOutcome.NotFound;
 
         if (job.Status == DiscoveryJobStatus.Queued)
         {
@@ -437,12 +528,12 @@ public sealed class IntegrationService : IIntegrationService
             }
             else
             {
-                return false;
+                return CancelJobOutcome.NotCancellable;
             }
         }
         else
         {
-            return false;
+            return CancelJobOutcome.NotCancellable;
         }
 
         await _context.SaveChangesAsync(cancellationToken);
@@ -451,7 +542,113 @@ public sealed class IntegrationService : IIntegrationService
             JsonSerializer.Serialize(new { job.IntegrationId }),
             GetIpAddress(), true, cancellationToken);
 
-        return true;
+        return CancelJobOutcome.Cancelled;
+    }
+
+    /// <summary>
+    /// Closes every open job of a deleted integration. In-process runs are
+    /// asked to stop (the runner records the cancellation); collector jobs and
+    /// runs without a runner in this process are closed directly, otherwise a
+    /// collector job would stay Running forever.
+    /// </summary>
+    private async Task<int> CloseJobsOfDeletedIntegrationAsync(Guid integrationId, CancellationToken cancellationToken)
+    {
+        var openJobs = await _context.DiscoveryJobs
+            .Where(j => j.IntegrationId == integrationId &&
+                        (j.Status == DiscoveryJobStatus.Queued || j.Status == DiscoveryJobStatus.Running))
+            .ToListAsync(cancellationToken);
+
+        var now = DateTime.UtcNow;
+        foreach (var job in openJobs)
+        {
+            if (job.Status == DiscoveryJobStatus.Running && job.JobType != "Collector" &&
+                _jobRunner.RequestCancellation(job.Id))
+            {
+                job.CurrentMessage = "Cancellation requested because the integration was deleted.";
+                continue;
+            }
+
+            var wasQueued = job.Status == DiscoveryJobStatus.Queued;
+            job.Status = wasQueued || job.JobType == "Collector" ? DiscoveryJobStatus.Cancelled : DiscoveryJobStatus.Failed;
+            job.CompletedAt = now;
+            job.UpdatedAt = now;
+            job.CurrentPhase = job.Status.ToString();
+            job.CurrentMessage = wasQueued
+                ? "Integration was deleted before the job started."
+                : "Integration was deleted while the job was running.";
+        }
+
+        return openJobs.Count;
+    }
+
+    /// <summary>
+    /// A deleted integration can never refresh what it discovered, so its
+    /// source links and relationships become stale, and so does every node
+    /// that no other live integration still reports — the same rule the
+    /// complete-snapshot sweep of ingestion applies.
+    /// </summary>
+    private async Task<(int Links, int Nodes, int Relationships)> RetireDiscoveredDataAsync(
+        Guid integrationId,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+
+        var links = await _context.NodeSourceLinks
+            .Where(l => l.IntegrationId == integrationId && !l.IsStale)
+            .ToListAsync(cancellationToken);
+        foreach (var link in links)
+        {
+            link.IsStale = true;
+            link.UpdatedAt = now;
+        }
+
+        var nodeIds = await _context.NodeSourceLinks
+            .Where(l => l.IntegrationId == integrationId)
+            .Select(l => l.NodeId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        var stillReported = await _context.NodeSourceLinks
+            .Where(l => nodeIds.Contains(l.NodeId) &&
+                        l.IntegrationId != integrationId &&
+                        !l.IsStale &&
+                        l.Integration.DeletedAt == null)
+            .Select(l => l.NodeId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var orphanIds = nodeIds.Except(stillReported).ToList();
+
+        var nodes = await _context.InfrastructureNodes
+            .Where(n => orphanIds.Contains(n.Id) && !n.IsStale)
+            .ToListAsync(cancellationToken);
+        foreach (var node in nodes)
+        {
+            node.IsStale = true;
+            node.StaleSince = now;
+            node.UpdatedAt = now;
+        }
+
+        var relationships = await _context.InfrastructureRelationships
+            .Where(r => r.IntegrationId == integrationId && !r.IsStale)
+            .ToListAsync(cancellationToken);
+        foreach (var relationship in relationships)
+        {
+            relationship.IsStale = true;
+            relationship.StaleSince = now;
+            relationship.UpdatedAt = now;
+        }
+
+        return (links.Count, nodes.Count, relationships.Count);
+    }
+
+    private static void RejectCollectorManaged(Integration integration)
+    {
+        if (integration.CollectorManaged)
+        {
+            throw new IntegrationValidationException(
+                "COLLECTOR_MANAGED",
+                "This integration is fed by a collector. Test and discovery run on the collector, not on the server.");
+        }
     }
 
     private AdapterDescriptorDto RequireAdapter(string adapterType)
@@ -510,6 +707,91 @@ public sealed class IntegrationService : IIntegrationService
 
         if (!CronSchedule.TryParse(schedule, out _, out var error))
             throw new IntegrationValidationException("SCHEDULE_INVALID", $"Discovery schedule is not a valid cron expression: {error}");
+    }
+
+    /// <summary>
+    /// Rejects a configuration that lacks a field the adapter's JSON schema
+    /// lists as "required"; such an integration would fail on every run.
+    /// </summary>
+    internal static void ValidateRequiredConfiguration(JsonObject configuration, AdapterDescriptorDto adapter)
+    {
+        // Secret fields live in the credential vault and are checked separately.
+        var missing = RequiredFields(adapter)
+            .Where(field => !adapter.ConfigurationSchema.SecretFields.Contains(field, StringComparer.OrdinalIgnoreCase))
+            .Where(field => configuration[field] switch
+            {
+                null => true,
+                JsonValue value when value.TryGetValue<string>(out var text) => string.IsNullOrWhiteSpace(text),
+                _ => false
+            })
+            .ToList();
+
+        if (missing.Count > 0)
+        {
+            throw new IntegrationValidationException(
+                "CONFIG_REQUIRED",
+                $"Required configuration field(s) missing: {string.Join(", ", missing)}.");
+        }
+    }
+
+    /// <summary>The server field takes a host name or IP address, not a URL.</summary>
+    internal static void ValidateServer(JsonObject configuration)
+    {
+        if (configuration["server"] is JsonValue value &&
+            value.TryGetValue<string>(out var server) &&
+            (server.Contains("://", StringComparison.Ordinal) || server.Contains('/')))
+        {
+            throw new IntegrationValidationException(
+                "CONFIG_INVALID_SERVER",
+                "Enter the server as a host name or IP address without a scheme or path (for example vcenter.corp.local).");
+        }
+    }
+
+    private static IReadOnlyList<string> RequiredFields(AdapterDescriptorDto adapter)
+    {
+        try
+        {
+            using var schema = JsonDocument.Parse(string.IsNullOrWhiteSpace(adapter.ConfigurationSchema.JsonSchema)
+                ? "{}"
+                : adapter.ConfigurationSchema.JsonSchema);
+            if (schema.RootElement.ValueKind == JsonValueKind.Object &&
+                schema.RootElement.TryGetProperty("required", out var required) &&
+                required.ValueKind == JsonValueKind.Array)
+            {
+                return required.EnumerateArray()
+                    .Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString()!)
+                    .ToList();
+            }
+        }
+        catch (JsonException)
+        {
+            // A malformed adapter schema must not block integration management.
+        }
+
+        return Array.Empty<string>();
+    }
+
+    private static JsonObject ParseConfiguration(string json)
+    {
+        try
+        {
+            return JsonNode.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json) as JsonObject ?? new JsonObject();
+        }
+        catch (JsonException)
+        {
+            return new JsonObject();
+        }
+    }
+
+    private static List<string> ChangedKeys(string previousJson, JsonObject next)
+    {
+        var previous = ParseConfiguration(previousJson);
+        return previous.Select(kv => kv.Key)
+            .Union(next.Select(kv => kv.Key), StringComparer.Ordinal)
+            .Where(key => !JsonNode.DeepEquals(previous[key], next[key]))
+            .OrderBy(key => key, StringComparer.Ordinal)
+            .ToList();
     }
 
     private static int ClampTimeout(int seconds) => Math.Clamp(seconds, 30, 86_400);
@@ -596,7 +878,7 @@ public sealed class IntegrationService : IIntegrationService
     private IntegrationDto MapIntegration(Integration integration, DateTime? lastJobStartedAt)
     {
         DateTime? nextScheduledRunAt = null;
-        if (integration.IsEnabled && CronSchedule.TryParse(integration.ScheduleCron, out var schedule, out _))
+        if (integration.IsEnabled && !integration.CollectorManaged && CronSchedule.TryParse(integration.ScheduleCron, out var schedule, out _))
             nextScheduledRunAt = _schedule.NextRun(schedule, integration.CreatedAt, lastJobStartedAt);
 
         var descriptor = _registry.GetDescriptors()
@@ -612,6 +894,7 @@ public sealed class IntegrationService : IIntegrationService
             AdapterVersion = integration.AdapterVersion,
             Status = integration.Status.ToString(),
             IsEnabled = integration.IsEnabled,
+            CollectorManaged = integration.CollectorManaged,
             ScheduleCron = integration.ScheduleCron,
             NextScheduledRunAt = nextScheduledRunAt,
             ScheduleTimeZone = _schedule.TimeZone.Id,

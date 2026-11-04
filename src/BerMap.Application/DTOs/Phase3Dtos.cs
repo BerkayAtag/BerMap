@@ -27,6 +27,10 @@ public sealed class IntegrationDto
     public string AdapterVersion { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
     public bool IsEnabled { get; set; }
+
+    /// <summary>Fed by a remote collector; the server never tests or discovers it.</summary>
+    public bool CollectorManaged { get; set; }
+
     public string ScheduleCron { get; set; } = string.Empty;
 
     /// <summary>
@@ -68,6 +72,7 @@ public sealed class CreateIntegrationRequest
     public string ScheduleCron { get; set; } = "0 */6 * * *";
     public int TimeoutSeconds { get; set; } = 1800;
     public bool IsEnabled { get; set; } = true;
+    public bool CollectorManaged { get; set; }
 }
 
 public sealed class UpdateIntegrationRequest
@@ -80,6 +85,7 @@ public sealed class UpdateIntegrationRequest
     public string? ScheduleCron { get; set; }
     public int? TimeoutSeconds { get; set; }
     public bool? IsEnabled { get; set; }
+    public bool? CollectorManaged { get; set; }
 }
 
 public sealed class TestConnectionRequest
@@ -379,6 +385,42 @@ public sealed class SnapshotVerificationDto
     public int ActualRelationshipCount { get; set; }
     public List<string> Differences { get; set; } = new();
     public DateTime VerifiedAt { get; set; } = DateTime.UtcNow;
+}
+
+/* ===== Audit ===== */
+
+public sealed class AuditQueryRequest
+{
+    public int Page { get; set; } = 1;
+    public int PageSize { get; set; } = 50;
+    public string? Action { get; set; }
+    public string? EntityType { get; set; }
+    public string? Username { get; set; }
+    public bool? Success { get; set; }
+    public DateTime? From { get; set; }
+    public DateTime? To { get; set; }
+}
+
+public sealed class AuditLogDto
+{
+    public Guid Id { get; set; }
+    public string UserId { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public string EntityType { get; set; } = string.Empty;
+    public string EntityId { get; set; } = string.Empty;
+    public string DetailsJson { get; set; } = "{}";
+    public string IpAddress { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public sealed class AuditPageDto
+{
+    public List<AuditLogDto> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
 }
 
 /* ===== Ingestion ===== */

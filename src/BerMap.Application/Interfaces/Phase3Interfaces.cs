@@ -25,7 +25,14 @@ public interface IIntegrationService
     Task<DiscoveryJobDto?> StartDiscoveryAsync(Guid id, StartDiscoveryRequest request, string actor, CancellationToken cancellationToken = default);
     Task<List<DiscoveryJobDto>> ListJobsAsync(Guid? integrationId, int limit, CancellationToken cancellationToken = default);
     Task<DiscoveryJobDto?> GetJobAsync(Guid id, CancellationToken cancellationToken = default);
-    Task<bool> CancelJobAsync(Guid jobId, string actor, CancellationToken cancellationToken = default);
+    Task<CancelJobOutcome> CancelJobAsync(Guid jobId, string actor, CancellationToken cancellationToken = default);
+}
+
+public enum CancelJobOutcome
+{
+    NotFound,
+    NotCancellable,
+    Cancelled
 }
 
 public interface IDiscoveryJobRunner

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -83,8 +84,85 @@ public class SimulationEngineTests
         return new FixtureGraphService(targetId);
     }
 
+    private static InfrastructureNodeDto Node(string name, string type, Dictionary<string, string>? props = null) =>
+        new() { Id = Guid.NewGuid(), Name = name, NodeType = type, Status = "healthy", Properties = props ?? new() };
+
+    private static InfrastructureRelationshipDto Edge(InfrastructureNodeDto source, InfrastructureNodeDto target, string type) =>
+        new() { Id = Guid.NewGuid(), SourceNodeId = source.Id, TargetNodeId = target.Id, RelationshipType = type };
+
+    private static Task<ImpactAnalysisResultDto> Run(GraphQueryResultDto graph, InfrastructureNodeDto target, string scenario) =>
+        new SimulationEngine(new StaticGraphService(graph)).RunSimulationAsync(new SimulationRunRequest
+        {
+            TargetNodeId = target.Id,
+            ScenarioType = scenario,
+        });
+
+    /// <summary>
+    /// Datacenter DC-01 Contains two clusters: CL-PROD (4 hosts, 70% CPU / 60% RAM,
+    /// HA as given) and CL-SIBLING (idle, HA enabled). esx-a is a CL-PROD member
+    /// hosting vm-01; a datastore and a network are contained by the datacenter.
+    /// </summary>
+    private sealed class ClusterTopology
+    {
+        public InfrastructureNodeDto Datacenter { get; } = Node("DC-01", "Datacenter");
+        public InfrastructureNodeDto Cluster { get; }
+        public InfrastructureNodeDto Sibling { get; } = Node("CL-SIBLING", "Cluster", new()
+        {
+            ["HaEnabled"] = "True",
+            ["HostCount"] = "4",
+            ["CpuCapacityMhz"] = "400000.0",
+            ["CpuUsageMhz"] = "40000.0",
+            ["MemoryCapacityMb"] = "4000.0",
+            ["MemoryUsageMb"] = "400.0",
+        });
+        public InfrastructureNodeDto Host { get; }
+        public InfrastructureNodeDto Vm { get; } = Node("vm-01", "VirtualMachine");
+        public InfrastructureNodeDto App { get; } = Node("app-01", "Application");
+        public InfrastructureNodeDto Datastore { get; } = Node("DS-01", "Datastore");
+        public InfrastructureNodeDto Network { get; } = Node("VLAN-10", "Network");
+        public GraphQueryResultDto Graph { get; }
+
+        public ClusterTopology(string haEnabled = "True", Dictionary<string, string>? hostProps = null, Dictionary<string, string>? clusterProps = null)
+        {
+            Cluster = Node("CL-PROD", "Cluster", clusterProps ?? new()
+            {
+                ["HaEnabled"] = haEnabled,
+                ["HostCount"] = "4",
+                ["CpuCapacityMhz"] = "400000.0",
+                ["CpuUsageMhz"] = "280000.0",
+                ["MemoryCapacityMb"] = "4000.0",
+                ["MemoryUsageMb"] = "2400.0",
+            });
+            Host = Node("esx-a", "Hypervisor", hostProps ?? new()
+            {
+                ["CpuCores"] = "10",
+                ["CpuMhz"] = "10000.0",
+                ["CpuCapacityMhz"] = "100000.0",
+                ["MemoryMb"] = "1000.0",
+            });
+            Graph = new GraphQueryResultDto
+            {
+                // Sibling first so any datacenter walk would hit it before CL-PROD.
+                Nodes = new() { Datacenter, Sibling, Cluster, Host, Vm, App, Datastore, Network },
+                Relationships = new()
+                {
+                    Edge(Datacenter, Sibling, "Contains"),
+                    Edge(Datacenter, Cluster, "Contains"),
+                    Edge(Datacenter, Host, "Contains"),
+                    Edge(Datacenter, Datastore, "Contains"),
+                    Edge(Datacenter, Network, "Contains"),
+                    Edge(Cluster, Host, "Contains"),
+                    Edge(Vm, Host, "HostedOn"),
+                    Edge(Vm, Datastore, "UsesStorage"),
+                    Edge(Vm, Network, "ConnectedTo"),
+                    Edge(App, Vm, "DependsOn"),
+                },
+            };
+        }
+    }
+
     [Fact]
-    public async Task HostFailure_ComputesRealBlastRadiusAndHeadroom()
+    public async Task HostFailure_ComputesRealBlastRadius_AndReportsUnknownHeadroomWithoutCapacityMetrics()
     {
         var fixture = NewFixture(out var targetId);
         var engine = new SimulationEngine(fixture);
@@ -104,14 +182,16 @@ public class SimulationEngineTests
         Assert.Equal(2, result.ProbableImpacts.Count);
         Assert.Contains(result.ProbableImpacts, i => i.Name == "Payments Core");
 
-        // Headroom derived from real cluster metrics: 100-78.4 / 100-61.2.
-        Assert.Equal(21.6, result.ClusterHeadroom.RemainingCpuPercent);
-        Assert.Equal(38.8, result.ClusterHeadroom.RemainingRamPercent);
-        Assert.True(result.ClusterHeadroom.HasCapacityForFailover);
+        // The cluster stores usage percentages only: without the cluster and
+        // host capacities the N-1 headroom cannot be computed, so it is Unknown.
+        Assert.Equal("Unknown", result.ClusterHeadroom.BottleneckCode);
+        Assert.Equal("Cluster-Core-Banking", result.ClusterHeadroom.ClusterName);
+        Assert.False(result.ClusterHeadroom.HasCapacityForFailover);
+        Assert.False(result.ClusterHeadroom.IsPostFailure);
+        Assert.Contains(result.RecommendationItems, i => i.Code == "metrics_missing");
+        Assert.Equal(result.RecommendationItems.Select(i => i.Text).ToList(), result.Recommendations);
 
-        // Deterministic risk formula, and it is not the old hardcoded 78.
         Assert.InRange(result.RiskScore, 0, 100);
-        Assert.NotEqual(0, result.ConfirmedImpacts.Count + result.ProbableImpacts.Count);
 
         // Same request twice → byte-stable deterministic output.
         var second = await engine.RunSimulationAsync(new SimulationRunRequest
@@ -140,21 +220,18 @@ public class SimulationEngineTests
         Assert.Equal("host_failure", result.ScenarioType);
     }
 
-    [Fact]
-    public async Task FrontendScenarioKeys_DatastoreOutage_AreAccepted()
+    [Theory]
+    [InlineData("datastore_outage", "DS-01", "datastore_failure")]
+    [InlineData("storage_failure", "DS-01", "datastore_failure")]
+    [InlineData("network_cut", "VLAN-10", "network_partition")]
+    public async Task ScenarioAliases_AreAcceptedForMatchingTargets(string alias, string targetName, string expected)
     {
-        var fixture = NewFixture(out var targetId);
-        var engine = new SimulationEngine(fixture);
+        var topology = new ClusterTopology();
+        var target = topology.Graph.Nodes.Single(n => n.Name == targetName);
 
-        var result = await engine.RunSimulationAsync(new SimulationRunRequest
-        {
-            TargetNodeId = targetId,
-            ScenarioType = "datastore_outage",
-        });
+        var result = await Run(topology.Graph, target, alias);
 
-        // UsesStorage edges are absent in this fixture, so no confirmed hits,
-        // but the scenario must still be recognized (normalized), not generic.
-        Assert.Equal("datastore_failure", result.ScenarioType);
+        Assert.Equal(expected, result.ScenarioType);
     }
 
     [Fact]
@@ -163,11 +240,28 @@ public class SimulationEngineTests
         var fixture = NewFixture(out var targetId);
         var engine = new SimulationEngine(fixture);
 
-        await Assert.ThrowsAsync<ArgumentException>(() => engine.RunSimulationAsync(new SimulationRunRequest
+        var error = await Assert.ThrowsAsync<IntegrationValidationException>(() => engine.RunSimulationAsync(new SimulationRunRequest
         {
             TargetNodeId = targetId,
             ScenarioType = "cluster_capacity_fake",
         }));
+        Assert.Equal("invalid_simulation", error.Code);
+    }
+
+    [Fact]
+    public async Task MissingTarget_IsAValidationError_NotANotFound()
+    {
+        var engine = new SimulationEngine(new FixtureGraphService(Guid.NewGuid()));
+
+        foreach (var target in new Guid?[] { null, Guid.Empty })
+        {
+            var error = await Assert.ThrowsAsync<IntegrationValidationException>(() => engine.RunSimulationAsync(new SimulationRunRequest
+            {
+                TargetNodeId = target,
+                ScenarioType = "host_failure",
+            }));
+            Assert.Equal("invalid_simulation", error.Code);
+        }
     }
 
     [Fact]
@@ -181,6 +275,193 @@ public class SimulationEngineTests
             TargetNodeId = Guid.NewGuid(),
             ScenarioType = "host_failure",
         }));
+    }
+
+    [Theory]
+    [InlineData("datastore_failure", "esx-a")]
+    [InlineData("host_failure", "DS-01")]
+    [InlineData("host_failure", "vm-01")]
+    [InlineData("host_failure", "CL-PROD")]
+    [InlineData("network_partition", "vm-01")]
+    [InlineData("workload_outage", "esx-a")]
+    [InlineData("workload_outage", "DC-01")]
+    public async Task MismatchedScenarioAndTarget_IsRejected(string scenario, string targetName)
+    {
+        var topology = new ClusterTopology();
+        var target = topology.Graph.Nodes.Single(n => n.Name == targetName);
+
+        var error = await Assert.ThrowsAsync<IntegrationValidationException>(() => Run(topology.Graph, target, scenario));
+
+        Assert.Equal("invalid_simulation", error.Code);
+    }
+
+    [Fact]
+    public async Task HostFailure_SubtractsTheFailedHostCapacity_NMinusOne()
+    {
+        // 4 x 100 GHz hosts at 70% CPU: 280 GHz of load on 300 GHz of survivors
+        // leaves 6.7%, below the 10% admission buffer. RAM: 2400 / 3000 MB → 20%.
+        var topology = new ClusterTopology();
+
+        var result = await Run(topology.Graph, topology.Host, "host_failure");
+
+        var headroom = result.ClusterHeadroom;
+        Assert.True(headroom.IsPostFailure);
+        Assert.Equal("CL-PROD", headroom.ClusterName);
+        Assert.Equal(6.7, headroom.RemainingCpuPercent);
+        Assert.Equal(20.0, headroom.RemainingRamPercent);
+        Assert.False(headroom.HasCapacityForFailover);
+        Assert.Equal("Cpu", headroom.BottleneckCode);
+        Assert.Contains(result.RecommendationItems, i => i.Code == "failover_not_confirmed");
+        Assert.DoesNotContain(result.RecommendationItems, i => i.Code == "headroom_sufficient");
+    }
+
+    [Fact]
+    public async Task HostFailure_NMinusOne_UsesPercentUsageAndHostCountFallbacks()
+    {
+        // Audit demo numbers: CL-PROD-01 has 4 hosts, 665600 MHz at 68% CPU and
+        // 3145728 MB at 74% RAM; the host has no capacity properties, so an even
+        // quarter of the cluster leaves. Survivors: 90.7% CPU, 98.7% RAM used.
+        var topology = new ClusterTopology(
+            hostProps: new Dictionary<string, string>(),
+            clusterProps: new()
+            {
+                ["HaEnabled"] = "True",
+                ["HostCount"] = "4",
+                ["CpuCapacityMhz"] = "665600.0",
+                ["CpuUsagePercent"] = "68.00",
+                ["MemoryCapacityMb"] = "3145728.0",
+                ["MemoryUsagePercent"] = "74.00",
+            });
+
+        var result = await Run(topology.Graph, topology.Host, "host_failure");
+
+        Assert.True(result.ClusterHeadroom.IsPostFailure);
+        Assert.Equal(9.3, result.ClusterHeadroom.RemainingCpuPercent);
+        Assert.Equal(1.3, result.ClusterHeadroom.RemainingRamPercent);
+        Assert.False(result.ClusterHeadroom.HasCapacityForFailover);
+        Assert.Equal("Ram", result.ClusterHeadroom.BottleneckCode);
+    }
+
+    [Fact]
+    public async Task HostFailure_WithoutAnyHostCapacity_IsUnknown()
+    {
+        var topology = new ClusterTopology(
+            hostProps: new Dictionary<string, string> { ["CpuCapacityMhz"] = "0.0", ["MemoryMb"] = "0.0" },
+            clusterProps: new()
+            {
+                ["CpuCapacityMhz"] = "400000.0",
+                ["CpuUsageMhz"] = "280000.0",
+                ["MemoryCapacityMb"] = "4000.0",
+                ["MemoryUsageMb"] = "2400.0",
+            });
+
+        var result = await Run(topology.Graph, topology.Host, "host_failure");
+
+        Assert.Equal("Unknown", result.ClusterHeadroom.BottleneckCode);
+        Assert.False(result.ClusterHeadroom.IsPostFailure);
+        Assert.Contains(result.RecommendationItems, i => i.Code == "metrics_missing");
+    }
+
+    [Fact]
+    public async Task HostFailure_SufficientHeadroom_UsesInvariantNumbers()
+    {
+        var previous = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = new CultureInfo("tr-TR");
+        try
+        {
+            var topology = new ClusterTopology(clusterProps: new()
+            {
+                ["HaEnabled"] = "True",
+                ["CpuCapacityMhz"] = "400000.0",
+                ["CpuUsageMhz"] = "120000.0",
+                ["MemoryCapacityMb"] = "4000.0",
+                ["MemoryUsageMb"] = "1500.0",
+            });
+
+            var result = await Run(topology.Graph, topology.Host, "host_failure");
+
+            // 120/300 GHz → 60% left; 1500/3000 MB → 50% left.
+            Assert.True(result.ClusterHeadroom.HasCapacityForFailover);
+            Assert.Equal("None", result.ClusterHeadroom.BottleneckCode);
+            var item = Assert.Single(result.RecommendationItems, i => i.Code == "headroom_sufficient");
+            Assert.Equal("60.0", item.Values["cpu"]);
+            Assert.Equal("50.0", item.Values["ram"]);
+            Assert.Contains("CPU 60.0%, RAM 50.0%", item.Text);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    [Fact]
+    public async Task HaDisabled_IsReportedForTheOwningClusterOnly()
+    {
+        // CL-PROD has HA disabled; the HA-enabled sibling in the same
+        // datacenter must not mask the warning.
+        var noHa = new ClusterTopology(haEnabled: "False");
+        var result = await Run(noHa.Graph, noHa.Host, "host_failure");
+
+        var ha = Assert.Single(result.RecommendationItems, i => i.Code == "ha_disabled");
+        Assert.Equal("CL-PROD", ha.Values["cluster"]);
+
+        // HA enabled on the owning cluster: no warning, even though a sibling
+        // could be anything.
+        var withHa = new ClusterTopology(haEnabled: "True");
+        var resultWithHa = await Run(withHa.Graph, withHa.Host, "host_failure");
+        Assert.DoesNotContain(resultWithHa.RecommendationItems, i => i.Code == "ha_disabled");
+    }
+
+    [Fact]
+    public void FindOwningCluster_ResolvesClusterHostAndWorkload_AndNeverWalksTheDatacenter()
+    {
+        var topology = new ClusterTopology();
+        var graph = topology.Graph;
+
+        Assert.Equal(topology.Cluster.Id, SimulationEngine.FindOwningCluster(topology.Cluster, graph));
+        Assert.Equal(topology.Cluster.Id, SimulationEngine.FindOwningCluster(topology.Host, graph));
+        Assert.Equal(topology.Cluster.Id, SimulationEngine.FindOwningCluster(topology.Vm, graph));
+        Assert.Null(SimulationEngine.FindOwningCluster(topology.Datastore, graph));
+        Assert.Null(SimulationEngine.FindOwningCluster(topology.Network, graph));
+        Assert.Null(SimulationEngine.FindOwningCluster(topology.Datacenter, graph));
+
+        // A host with a MemberOf edge (instead of cluster Contains host) resolves too.
+        var memberHost = Node("esx-b", "Hypervisor");
+        graph.Nodes.Add(memberHost);
+        graph.Relationships.Add(Edge(memberHost, topology.Sibling, "MemberOf"));
+        graph.Relationships.Add(Edge(topology.Datacenter, memberHost, "Contains"));
+        Assert.Equal(topology.Sibling.Id, SimulationEngine.FindOwningCluster(memberHost, graph));
+    }
+
+    [Theory]
+    [InlineData("datastore_failure", "DS-01")]
+    [InlineData("network_partition", "VLAN-10")]
+    public async Task StorageAndNetworkTargets_HaveNoComputeHeadroom(string scenario, string targetName)
+    {
+        var topology = new ClusterTopology();
+        var target = topology.Graph.Nodes.Single(n => n.Name == targetName);
+
+        var result = await Run(topology.Graph, target, scenario);
+
+        Assert.Equal("NotApplicable", result.ClusterHeadroom.BottleneckCode);
+        Assert.Equal(string.Empty, result.ClusterHeadroom.ClusterName);
+        Assert.False(result.ClusterHeadroom.IsPostFailure);
+        Assert.Equal("vm-01", Assert.Single(result.ConfirmedImpacts).Name);
+    }
+
+    [Fact]
+    public async Task WorkloadOutage_ReportsTheHostingClusterHeadroom()
+    {
+        var topology = new ClusterTopology();
+
+        var result = await Run(topology.Graph, topology.Vm, "workload_outage");
+
+        // Current (not N-1) headroom of the cluster the VM runs in.
+        Assert.Equal("CL-PROD", result.ClusterHeadroom.ClusterName);
+        Assert.False(result.ClusterHeadroom.IsPostFailure);
+        Assert.Equal(30.0, result.ClusterHeadroom.RemainingCpuPercent);
+        Assert.Equal(40.0, result.ClusterHeadroom.RemainingRamPercent);
+        Assert.Equal("app-01", Assert.Single(result.ConfirmedImpacts).Name);
     }
 
     [Fact]
@@ -251,25 +532,31 @@ public class SimulationEngineTests
         Assert.Equal("app-core-02", probable.Name);
         Assert.Equal("app-core-02 -> [DependsOn] -> mq-broker-01", probable.DependencyPath);
         Assert.DoesNotContain(result.ProbableImpacts.Concat(result.PossibleImpacts), i => i.Name == "VLAN-204-App");
+
+        // Standalone host (no cluster): no failover target for its workloads.
+        Assert.Equal("NotApplicable", result.ClusterHeadroom.BottleneckCode);
+        Assert.Contains(result.RecommendationItems, i => i.Code == "single_point_of_failure");
     }
 
     [Fact]
-    public async Task WorkloadTarget_ImpactsItsDependents_NotItsHostOrDatastore()
+    public async Task WorkloadOutage_ImpactsItsDependents_NotItsHostOrDatastore()
     {
         var hostId = Guid.NewGuid();
         var datastoreId = Guid.NewGuid();
         var dbId = Guid.NewGuid();
         var appId = Guid.NewGuid();
         var webId = Guid.NewGuid();
+        var portalId = Guid.NewGuid();
         var graph = new GraphQueryResultDto
         {
             Nodes = new List<InfrastructureNodeDto>
             {
                 new() { Id = hostId, Name = "esx02", NodeType = "Hypervisor" },
                 new() { Id = datastoreId, Name = "DS-01", NodeType = "Datastore" },
-                new() { Id = dbId, Name = "sql-core-01", NodeType = "VirtualMachine" },
+                new() { Id = dbId, Name = "sql-core-01", NodeType = "Database" },
                 new() { Id = appId, Name = "app-core-01", NodeType = "VirtualMachine" },
                 new() { Id = webId, Name = "web-portal-01", NodeType = "VirtualMachine" },
+                new() { Id = portalId, Name = "Customer Portal", NodeType = "Application" },
             },
             Relationships = new List<InfrastructureRelationshipDto>
             {
@@ -277,23 +564,76 @@ public class SimulationEngineTests
                 new() { Id = Guid.NewGuid(), SourceNodeId = dbId, TargetNodeId = datastoreId, RelationshipType = "UsesStorage" },
                 new() { Id = Guid.NewGuid(), SourceNodeId = appId, TargetNodeId = dbId, RelationshipType = "UsesDatabase" },
                 new() { Id = Guid.NewGuid(), SourceNodeId = webId, TargetNodeId = appId, RelationshipType = "DependsOn" },
+                new() { Id = Guid.NewGuid(), SourceNodeId = portalId, TargetNodeId = webId, RelationshipType = "DependsOn" },
             },
         };
 
-        foreach (var scenario in new[] { "host_failure", "datastore_failure" })
+        var result = await new SimulationEngine(new StaticGraphService(graph)).RunSimulationAsync(new SimulationRunRequest
         {
-            var result = await new SimulationEngine(new StaticGraphService(graph)).RunSimulationAsync(new SimulationRunRequest
-            {
-                TargetNodeId = dbId,
-                ScenarioType = scenario,
-            });
+            TargetNodeId = dbId,
+            ScenarioType = "workload_outage",
+        });
 
-            var confirmed = Assert.Single(result.ConfirmedImpacts);
-            Assert.Equal("app-core-01", confirmed.Name);
-            Assert.Equal("web-portal-01", Assert.Single(result.ProbableImpacts).Name);
-            Assert.DoesNotContain(result.ConfirmedImpacts.Concat(result.ProbableImpacts).Concat(result.PossibleImpacts),
-                i => i.Name is "esx02" or "DS-01");
+        Assert.Equal("workload_outage", result.ScenarioType);
+        var confirmed = Assert.Single(result.ConfirmedImpacts);
+        Assert.Equal("app-core-01", confirmed.Name);
+        Assert.Equal("app-core-01 -> [UsesDatabase] -> sql-core-01", confirmed.DependencyPath);
+        Assert.Equal("web-portal-01", Assert.Single(result.ProbableImpacts).Name);
+        Assert.Equal("Customer Portal", Assert.Single(result.PossibleImpacts).Name);
+        Assert.DoesNotContain(result.ConfirmedImpacts.Concat(result.ProbableImpacts).Concat(result.PossibleImpacts),
+            i => i.Name is "esx02" or "DS-01");
+
+        // The host has no cluster in this graph: compute headroom does not apply.
+        Assert.Equal("NotApplicable", result.ClusterHeadroom.BottleneckCode);
+    }
+
+    [Fact]
+    public async Task Recommendations_AreStructured_WithoutFixedMaintenanceHoursOrDoubledEllipsis()
+    {
+        var host = Node("esx01", "Hypervisor");
+        var vm = Node("mq-01", "VirtualMachine");
+        var nodes = new List<InfrastructureNodeDto> { host, vm };
+        var edges = new List<InfrastructureRelationshipDto> { Edge(vm, host, "HostedOn") };
+        foreach (var name in new[] { "svc-a", "svc-b", "svc-c", "svc-d", "svc-e" })
+        {
+            var svc = Node(name, "Service");
+            nodes.Add(svc);
+            edges.Add(Edge(svc, vm, "DependsOn"));
         }
+        var graph = new GraphQueryResultDto { Nodes = nodes, Relationships = edges };
+
+        var result = await Run(graph, host, "host_failure");
+
+        var unavailable = Assert.Single(result.RecommendationItems, i => i.Code == "workloads_unavailable");
+        Assert.Equal("1", unavailable.Values["count"]);
+        Assert.Equal("esx01", unavailable.Values["target"]);
+
+        var degrade = Assert.Single(result.RecommendationItems, i => i.Code == "dependents_degrade");
+        Assert.Equal("5", degrade.Values["count"]);
+        Assert.Equal("svc-a, svc-b, svc-c, …", degrade.Values["names"]);
+
+        Assert.Equal(result.RecommendationItems.Select(i => i.Text).ToList(), result.Recommendations);
+        Assert.All(result.Recommendations, text =>
+        {
+            Assert.DoesNotContain("....", text);
+            Assert.DoesNotContain("banking", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("09:00", text);
+        });
+    }
+
+    [Fact]
+    public async Task NoConfirmedImpact_ReturnsNoDirectImpactOnly()
+    {
+        var topology = new ClusterTopology();
+        var idleHost = Node("esx-idle", "Hypervisor");
+        topology.Graph.Nodes.Add(idleHost);
+        topology.Graph.Relationships.Add(Edge(topology.Cluster, idleHost, "Contains"));
+
+        var result = await Run(topology.Graph, idleHost, "host_failure");
+
+        var item = Assert.Single(result.RecommendationItems);
+        Assert.Equal("no_direct_impact", item.Code);
+        Assert.Equal("esx-idle", item.Values["target"]);
     }
 }
 

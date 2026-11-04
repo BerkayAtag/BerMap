@@ -94,6 +94,11 @@ builder.Services.AddAuthorization(options =>
         nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
         nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator),
         nameof(BerMap.Domain.Enums.UserRole.InfrastructureOperator)));
+    // The audit trail holds failed sign-ins, client addresses and change
+    // details, so only administrators and auditors may read it.
+    options.AddPolicy(AuthorizationPolicies.ViewAudit, policy => policy.RequireRole(
+        nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
+        nameof(BerMap.Domain.Enums.UserRole.SecurityAuditor)));
 });
 // Behind IIS/nginx the TCP peer is the proxy. Only forwarded headers from the
 // configured proxies are trusted, so the login limiter and the audit log see

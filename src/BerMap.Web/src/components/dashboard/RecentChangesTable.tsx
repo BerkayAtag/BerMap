@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { Server, Cpu, Database, Network } from 'lucide-react';
@@ -32,6 +33,7 @@ function getChangeBadge(changeType: string, isTr: boolean) {
           {isTr ? 'Yeni Keşif' : 'New Discovery'}
         </span>
       );
+    case 'StatusChanged':
     case 'Status Changed':
       return (
         <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
@@ -65,12 +67,16 @@ export const RecentChangesTable: React.FC<RecentChangesTableProps> = ({
   isLoading = false,
   error = null,
 }) => {
+  const navigate = useNavigate();
   const locale = useLocale();
   const isTr = locale === 'tr';
 
   const labels = {
     title: isTr ? 'Son Altyapı Değişiklikleri & Keşifler' : 'Recent Infrastructure Changes & Discoveries',
-    subtitle: isTr ? 'Zamanlanmış ve otomatik tetiklenen envanter olayları' : 'Scheduled and automatic inventory events',
+    subtitle: isTr
+      ? 'İlk kez keşfedilen ve durumu değişen bileşenler, en yeniden eskiye'
+      : 'Newly discovered components and real status changes, newest first',
+    open: isTr ? 'Envanterde aç' : 'Open in inventory',
     loading: isTr ? 'Yükleniyor...' : 'Loading...',
     emptyTitle: isTr ? 'Henüz keşif kaydı yok' : 'No discovery records yet',
     emptyBody: isTr ? 'Bir entegrasyon ekleyip keşif başlattığınızda değişiklikler burada görünür.' : 'Add an integration and start a discovery to see changes here.',
@@ -125,15 +131,22 @@ export const RecentChangesTable: React.FC<RecentChangesTableProps> = ({
             <tbody className="divide-y divide-neutral-100 dark:divide-dark-border">
               {changes.map((change) => (
                 <tr
-                  key={change.id}
-                  className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors"
+                  key={`${change.id}-${change.changeType}-${change.timestamp}`}
+                  onClick={() => navigate(`/inventory?node=${encodeURIComponent(change.id)}`)}
+                  className="cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors"
                 >
                   <td className="py-3 pl-1">
                     <div className="flex items-center gap-2.5">
                       {getIcon(change.entityType)}
-                      <span className="font-medium text-neutral-900 dark:text-white truncate max-w-[220px]">
+                      {/* The row is clickable; the link keeps it reachable by keyboard. */}
+                      <Link
+                        to={`/inventory?node=${encodeURIComponent(change.id)}`}
+                        onClick={(event) => event.stopPropagation()}
+                        title={labels.open}
+                        className="font-medium text-neutral-900 dark:text-white truncate max-w-[220px] hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary rounded"
+                      >
                         {change.entityName}
-                      </span>
+                      </Link>
                     </div>
                   </td>
                   <td className="py-3">{getChangeBadge(change.changeType, isTr)}</td>

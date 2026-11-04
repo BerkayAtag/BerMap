@@ -19,3 +19,11 @@ export function useI18n() {
 export function useT() {
   return useI18n().t;
 }
+
+/** Replaces {name} placeholders with values; a missing value leaves the placeholder out. */
+export function interpolate(template: string, values: Record<string, string | number | null | undefined> = {}): string {
+  return template.replace(/\{(\w+)\}/g, (_, name: string) => {
+    const value = values[name];
+    return value === null || value === undefined ? '' : String(value);
+  });
+}

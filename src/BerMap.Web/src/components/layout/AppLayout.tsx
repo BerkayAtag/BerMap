@@ -5,8 +5,8 @@ import { TopNav } from './TopNav';
 
 export const AppLayout: React.FC = () => {
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-neutral-100 dark:bg-dark-bg text-neutral-900 dark:text-dark-text transition-colors">
-      {/* Sidebar */}
+    <div className="flex h-dvh w-full overflow-hidden bg-neutral-100 dark:bg-dark-bg text-neutral-900 dark:text-dark-text transition-colors">
+      {/* Sidebar: a rail from md up, an off-canvas drawer below */}
       <Sidebar />
 
       {/* Main Column */}
@@ -15,7 +15,7 @@ export const AppLayout: React.FC = () => {
         <TopNav />
 
         {/* Dynamic Route Content */}
-        <main className="flex-1 overflow-y-auto p-6 transition-all">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 transition-all">
           <Outlet />
         </main>
       </div>

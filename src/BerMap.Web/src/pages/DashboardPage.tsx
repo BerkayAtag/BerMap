@@ -4,12 +4,13 @@ import {
   CheckCircle2,
   PlugZap,
   GitFork,
-  Play,
   RotateCw,
   Cpu,
   AlertTriangle,
   GitMerge,
+  ClipboardCheck,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { KPICard } from '@/components/dashboard/KPICard';
 import { SystemHealthChart } from '@/components/dashboard/SystemHealthChart';
 import { RecentChangesTable } from '@/components/dashboard/RecentChangesTable';
@@ -17,6 +18,7 @@ import { Button } from '@/components/ui/Button';
 import { ButtonLink } from '@/components/ui/ButtonLink';
 import { useDashboard } from '@/hooks/useDashboard';
 import { useLocale } from '@/lib/i18n';
+import { formatNumber, formatPercent, getErrorMessage } from '@/lib/format';
 
 export const DashboardPage: React.FC = () => {
   const { data, isLoading, isError, error, refetch, isFetching } = useDashboard();
@@ -25,13 +27,17 @@ export const DashboardPage: React.FC = () => {
 
   const total = data?.totalEntities ?? 0;
   const healthy = data?.healthyEntities ?? 0;
-  const healthyPercent = total > 0 ? ((healthy / total) * 100).toFixed(1) : '0.0';
+  const healthyPercent = total > 0 ? (healthy / total) * 100 : 0;
+  const activeIntegrations = data?.activeIntegrations ?? 0;
+  const totalIntegrations = data?.totalIntegrations ?? 0;
+  const pendingReviews = data?.pendingReconciliationReviews ?? 0;
+  // Without data (first load failed) the cards show placeholders, never real-looking zeros.
+  const noData = !data;
 
   const labels = {
     title: isTr ? 'Altyapı İstihbarat Paneli' : 'Infrastructure Intelligence Dashboard',
     subtitle: isTr ? 'Kurumsal IT altyapısı, bileşen bağımlılıkları ve simülasyon özeti' : 'Enterprise IT infrastructure, component dependencies and simulation summary',
     refresh: isTr ? 'Yenile' : 'Refresh',
-    startSimulation: isTr ? 'Simülasyon Başlat' : 'Start Simulation',
     errorFetch: isTr ? 'Dashboard verisi alınamadı.' : 'Failed to fetch dashboard data.',
     kpiTotal: isTr ? 'Toplam Keşfedilen Varlık' : 'Total Discovered Entities',
     kpiTotalChange: isTr ? 'son 24 saatte' : 'in last 24h',
@@ -41,20 +47,34 @@ export const DashboardPage: React.FC = () => {
     kpiHealthySub: isTr ? 'Normal çalışan servisler' : 'Normal running services',
     kpiActive: isTr ? 'Aktif Entegrasyonlar' : 'Active Integrations',
     kpiActiveOk: isTr ? 'Keşif kaynakları hazır' : 'Discovery sources ready',
-    kpiActiveWait: isTr ? 'Entegrasyon bekleniyor' : 'Awaiting integration',
+    kpiActiveNone: isTr ? 'Henüz entegrasyon eklenmedi' : 'No integrations added yet',
+    kpiActiveDown: isTr ? 'Hiçbiri aktif değil — kontrol edin' : 'None active — check them',
     kpiActiveSub: isTr ? 'Salt-okunur bağlantılar' : 'Read-only connections',
     kpiCritical: isTr ? 'Kritik Bağımlılık Yolları' : 'Critical Dependency Paths',
-    kpiCriticalChange: isTr ? 'uzlaştırma incelemesi' : 'reconciliation reviews',
-    kpiCriticalSub: isTr ? 'Yüksek etki potansiyeli' : 'High impact potential',
+    kpiCriticalChange: isTr ? 'kritik bileşen' : 'critical components',
+    kpiCriticalSub: isTr ? 'Kritik düğümlere bağlı ilişkiler' : 'Relationships touching critical nodes',
+    reviewAlert: isTr
+      ? 'uzlaştırma incelemesi bekliyor (olası yinelenen kayıtlar).'
+      : 'reconciliation reviews are pending (possible duplicate records).',
+    reviewLink: isTr ? 'İncele' : 'Review',
     staleAlert: isTr ? 'varlık artık hiçbir keşif kaynağından görülmüyor. Envanter sayfasından inceleyebilirsiniz.' : 'entities are no longer seen by any discovery source. Check Inventory page.',
-    simTitle: isTr ? 'BerSim — Simülasyon Stüdyosu' : 'BerSim — Simulation Studio',
-    simSub: isTr ? 'Üretim ortamına dokunmadan host kesintilerini, VM taşımalarını veya ağ bağlantı arızalarını deterministik olarak simüle edin.' : 'Simulate host outages, VM migrations, or network failures deterministically without touching production.',
-    simButton: isTr ? 'Simülasyon Stüdyosuna Git' : 'Go to Simulation Studio',
+    simTitle: isTr ? 'BerSim — Simülasyon' : 'BerSim — Simulation',
+    simSub: isTr
+      ? 'Üretim ortamına dokunmadan host, datastore, ağ veya iş yükü kesintilerinin etkisini deterministik olarak hesaplayın ve değişiklik risk raporu alın.'
+      : 'Compute the impact of host, datastore, network or workload outages deterministically without touching production, and get a change risk report.',
+    simButton: isTr ? 'Simülasyona Git' : 'Open Simulation',
   };
 
-  const errorMessage = isError
-    ? (error as { message?: string } | null)?.message ?? labels.errorFetch
-    : null;
+  const errorMessage = isError ? getErrorMessage(error) || labels.errorFetch : null;
+  const placeholder = '—';
+
+  const activeChange = noData
+    ? undefined
+    : totalIntegrations === 0
+      ? labels.kpiActiveNone
+      : activeIntegrations === 0
+        ? labels.kpiActiveDown
+        : labels.kpiActiveOk;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -79,17 +99,19 @@ export const DashboardPage: React.FC = () => {
             <RotateCw className={`w-4 h-4 text-neutral-500 ${isFetching ? 'animate-spin' : ''}`} />
             {labels.refresh}
           </Button>
-          <ButtonLink to="/simulation" variant="primary" size="sm" className="gap-2 bg-brand-primary">
-            <Play className="w-4 h-4 fill-white" />
-            {labels.startSimulation}
-          </ButtonLink>
         </div>
       </div>
 
       {errorMessage && (
-        <div className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4" />
-          {errorMessage}
+        <div
+          role="alert"
+          className="p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300 flex items-center gap-2"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="flex-1">
+            {labels.errorFetch} {errorMessage !== labels.errorFetch ? errorMessage : ''}
+            {data ? (isTr ? ' Son alınan veriler gösteriliyor.' : ' Showing the last data received.') : ''}
+          </span>
         </div>
       )}
 
@@ -106,8 +128,8 @@ export const DashboardPage: React.FC = () => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <KPICard
             title={labels.kpiTotal}
-            value={total.toLocaleString(isTr ? 'tr-TR' : 'en-US')}
-            change={`${data?.recentDiscoveries ?? 0} ${labels.kpiTotalChange}`}
+            value={noData ? placeholder : formatNumber(total)}
+            change={noData ? undefined : `${formatNumber(data.recentDiscoveries)} ${labels.kpiTotalChange}`}
             trend="neutral"
             icon={Server}
             accent="primary"
@@ -115,27 +137,27 @@ export const DashboardPage: React.FC = () => {
           />
           <KPICard
             title={labels.kpiHealthy}
-            value={healthy.toLocaleString(isTr ? 'tr-TR' : 'en-US')}
-            change={`${healthyPercent}% ${labels.kpiHealthyChange}`}
-            trend="up"
+            value={noData ? placeholder : formatNumber(healthy)}
+            change={noData ? undefined : `${formatPercent(healthyPercent)} ${labels.kpiHealthyChange}`}
+            trend="neutral"
             icon={CheckCircle2}
             accent="healthy"
             subtitle={labels.kpiHealthySub}
           />
           <KPICard
             title={labels.kpiActive}
-            value={`${data?.activeIntegrations ?? 0} / ${data?.totalIntegrations ?? 0}`}
-            change={(data?.activeIntegrations ?? 0) > 0 ? labels.kpiActiveOk : labels.kpiActiveWait}
-            trend="neutral"
+            value={noData ? placeholder : `${formatNumber(activeIntegrations)} / ${formatNumber(totalIntegrations)}`}
+            change={activeChange}
+            trend={!noData && totalIntegrations > 0 && activeIntegrations === 0 ? 'down' : 'neutral'}
             icon={PlugZap}
             accent="info"
             subtitle={labels.kpiActiveSub}
           />
           <KPICard
             title={labels.kpiCritical}
-            value={(data?.criticalDependenciesCount ?? 0).toLocaleString(isTr ? 'tr-TR' : 'en-US')}
-            change={`${data?.pendingReconciliationReviews ?? 0} ${labels.kpiCriticalChange}`}
-            trend="down"
+            value={noData ? placeholder : formatNumber(data.criticalDependenciesCount)}
+            change={noData ? undefined : `${formatNumber(data.criticalEntities)} ${labels.kpiCriticalChange}`}
+            trend="neutral"
             icon={GitFork}
             accent="warning"
             subtitle={labels.kpiCriticalSub}
@@ -159,16 +181,32 @@ export const DashboardPage: React.FC = () => {
           <RecentChangesTable
             changes={data?.recentChanges ?? []}
             isLoading={isLoading}
-            error={errorMessage}
+            // The page banner already reports a failed refresh over existing rows.
+            error={noData ? errorMessage : null}
           />
         </div>
       </div>
 
+      {pendingReviews > 0 && (
+        <div className="p-4 rounded-xl border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/30 flex flex-wrap items-center gap-3">
+          <ClipboardCheck className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0" />
+          <p className="text-sm text-blue-800 dark:text-blue-300 flex-1 min-w-0">
+            {formatNumber(pendingReviews)} {labels.reviewAlert}
+          </p>
+          <Link
+            to="/inventory?review=1"
+            className="text-sm font-semibold text-blue-700 dark:text-blue-300 hover:underline"
+          >
+            {labels.reviewLink}
+          </Link>
+        </div>
+      )}
+
       {(data?.staleEntities ?? 0) > 0 && (
         <div className="p-4 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 flex items-center gap-3">
-          <GitMerge className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+          <GitMerge className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
           <p className="text-sm text-amber-800 dark:text-amber-300">
-            {data?.staleEntities} {labels.staleAlert}
+            {formatNumber(data?.staleEntities)} {labels.staleAlert}
           </p>
         </div>
       )}

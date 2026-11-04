@@ -33,10 +33,10 @@ public sealed class SnapshotService : ISnapshotService
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
-            throw new ArgumentException("Snapshot name is required.", nameof(request));
+            throw new ArgumentException("Snapshot name is required.");
 
         if (request.Name.Trim().Length > 200)
-            throw new ArgumentException("Snapshot name must be 200 characters or fewer.", nameof(request));
+            throw new ArgumentException("Snapshot name must be 200 characters or fewer.");
 
         for (var attempt = 0; ; attempt++)
         {
@@ -213,6 +213,11 @@ public sealed class SnapshotService : ISnapshotService
         Guid snapshotBId,
         CancellationToken cancellationToken = default)
     {
+        // The messages reach the console as the problem title; ArgumentException
+        // is created without a parameter name so no ".NET suffix" is appended.
+        if (snapshotAId == Guid.Empty || snapshotBId == Guid.Empty)
+            throw new ArgumentException("Select two snapshots to compare (query parameters a and b).");
+
         var a = await LoadGraphAsync(snapshotAId, cancellationToken)
                 ?? throw new KeyNotFoundException($"Snapshot '{snapshotAId}' was not found.");
         var b = await LoadGraphAsync(snapshotBId, cancellationToken)

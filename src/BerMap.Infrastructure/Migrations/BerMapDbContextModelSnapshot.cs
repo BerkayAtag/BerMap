@@ -258,6 +258,9 @@ namespace BerMap.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTime?>("StatusChangedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -378,6 +381,9 @@ namespace BerMap.Infrastructure.Migrations
                     b.Property<string>("AdapterVersion")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<bool>("CollectorManaged")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("ConfigurationJson")
                         .IsRequired()

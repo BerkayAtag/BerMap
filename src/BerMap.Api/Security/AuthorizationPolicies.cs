@@ -10,4 +10,7 @@ public static class AuthorizationPolicies
 
     /// <summary>Create, change and deactivate console accounts.</summary>
     public const string ManageUsers = "ManageUsers";
+
+    /// <summary>Read the security audit trail.</summary>
+    public const string ViewAudit = "ViewAudit";
 }

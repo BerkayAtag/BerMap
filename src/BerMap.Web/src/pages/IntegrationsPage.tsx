@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { Fragment, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -7,25 +7,39 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock3,
   Loader2,
+  Pencil,
   Play,
   PlugZap,
   Plus,
   Power,
   PowerOff,
   RefreshCw,
+  Server,
   ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react';
-import { IntegrationWizardModal } from '@/components/integrations/IntegrationWizardModal';
+import {
+  IntegrationWizardModal,
+  type IntegrationWizardResult,
+} from '@/components/integrations/IntegrationWizardModal';
+import {
+  connectionErrorText,
+  describeJobMessage,
+  integrationErrorMessage,
+  jobPhaseLabel,
+} from '@/components/integrations/integrationText';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
 import { useCanManageIntegrations } from '@/stores/authStore';
 import {
   formatDateTime,
+  formatDuration,
   formatLatency,
   formatNumber,
   formatRelativeTime,
@@ -108,7 +122,8 @@ function integrationWarnings(integration: Integration, isTr: boolean): string[] 
     warnings.push(isTr ? 'Entegrasyon devre dışı; yeni keşif başlatılamaz.' : 'Integration is disabled; a new discovery cannot be started.');
   }
   if (integration.lastError) {
-    warnings.push(integration.lastError);
+    const { label, detail } = describeJobMessage(integration.lastError, isTr);
+    warnings.push(label ? `${label} ${detail}`.trim() : detail);
   }
 
   return warnings;
@@ -120,7 +135,9 @@ export const IntegrationsPage: React.FC = () => {
   const queryClient = useQueryClient();
   const t = useT();
   const canManage = useCanManageIntegrations();
-  const [isWizardOpen, setIsWizardOpen] = useState(false);
+  // null = closed; { integration: null } = create; otherwise edit that integration.
+  const [wizardTarget, setWizardTarget] = useState<{ integration: Integration | null } | null>(null);
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -171,13 +188,15 @@ export const IntegrationsPage: React.FC = () => {
             : `${integration.name}: connection successful (${formatLatency(result.latency)}).${warningText}`
         );
       } else {
+        const localized = connectionErrorText(result.errorCode, isTr);
+        const detail = result.errorDetail || result.message;
         setActionError(
-          `${integration.name}: ${result.errorDetail || result.message}` +
+          `${integration.name}: ${localized ? `${localized} ${detail ? `— ${detail}` : ''}` : detail}`.trim() +
             (result.errorCode ? ` (${result.errorCode})` : '')
         );
       }
     } catch (error) {
-      setActionError(`${integration.name}: ${getErrorMessage(error)}`);
+      setActionError(`${integration.name}: ${integrationErrorMessage(error, isTr)}`);
     } finally {
       setBusyAction(null);
     }
@@ -200,14 +219,15 @@ export const IntegrationsPage: React.FC = () => {
           : `${integration.name}: discovery job queued (${jobStatusLabel(isTr, job.status)}).`
       );
     } catch (error) {
-      setActionError(`${integration.name}: ${getErrorMessage(error)}`);
+      setActionError(`${integration.name}: ${integrationErrorMessage(error, isTr)}`);
     } finally {
       setBusyAction(null);
     }
   };
 
   const handleBulkDiscover = async () => {
-    const enabled = integrations.filter((item) => item.isEnabled);
+    // Collector-managed integrations are fed by their collector, never discovered from here.
+    const enabled = integrations.filter((item) => item.isEnabled && !item.collectorManaged);
     if (enabled.length === 0) {
       setActionError(isTr ? 'Keşif başlatılabilecek etkin entegrasyon bulunmuyor.' : 'No enabled integration available to start discovery.');
       return;
@@ -236,7 +256,7 @@ export const IntegrationsPage: React.FC = () => {
         .slice(0, 3)
         .map(({ result, integration }) =>
           `${integration.name}: ${
-            result.status === 'rejected' ? getErrorMessage(result.reason) : ''
+            result.status === 'rejected' ? integrationErrorMessage(result.reason, isTr) : ''
           }`
         )
         .join(' ');
@@ -274,7 +294,7 @@ export const IntegrationsPage: React.FC = () => {
           : `${integration.name} ${integration.isEnabled ? 'disabled' : 'enabled'}.`
       );
     } catch (error) {
-      setActionError(`${integration.name}: ${getErrorMessage(error)}`);
+      setActionError(`${integration.name}: ${integrationErrorMessage(error, isTr)}`);
     } finally {
       setBusyAction(null);
     }
@@ -283,8 +303,8 @@ export const IntegrationsPage: React.FC = () => {
   const handleDelete = async (integration: Integration) => {
     const confirmed = window.confirm(
       isTr
-        ? `${integration.name} entegrasyonu silinsin mi? Bu işlem geçmiş keşif verilerini silmez, ancak entegrasyonu ve şifreli kimlik bilgisini kaldırır.`
-        : `Delete integration ${integration.name}? This does not delete past discovery data, but removes the integration and its encrypted credential.`
+        ? `${integration.name} entegrasyonu silinsin mi? Keşfedilen varlıklar silinmez; yalnızca bu kaynaktan gelenler "eski" olarak işaretlenir. Entegrasyon, şifreli kimlik bilgisi ve bekleyen keşif işleri iptal edilir.`
+        : `Delete integration ${integration.name}? Discovered entities are kept; those only this source reported are marked stale. The integration, its encrypted credential and its pending discovery jobs are cancelled.`
     );
     if (!confirmed) return;
 
@@ -297,7 +317,7 @@ export const IntegrationsPage: React.FC = () => {
       await refreshAll();
       setNotice(isTr ? `${integration.name} silindi.` : `${integration.name} deleted.`);
     } catch (error) {
-      setActionError(`${integration.name}: ${getErrorMessage(error)}`);
+      setActionError(`${integration.name}: ${integrationErrorMessage(error, isTr)}`);
     } finally {
       setBusyAction(null);
     }
@@ -319,7 +339,31 @@ export const IntegrationsPage: React.FC = () => {
     }
   };
 
+  const handleWizardSuccess = (result: IntegrationWizardResult) => {
+    void refreshAll();
+    setActionError(null);
+    const name = result.integration.name;
+    if (result.mode === 'edit') {
+      setNotice(isTr ? `${name} güncellendi.` : `${name} updated.`);
+    } else if (result.discoveryStarted) {
+      setNotice(isTr
+        ? `${name} oluşturuldu. Bağlantı durumu ve keşif işi aşağıda görüntülenebilir.`
+        : `${name} created. Its connection status and discovery job are shown below.`);
+    } else if (result.integration.collectorManaged) {
+      setNotice(isTr
+        ? `${name} oluşturuldu. Veriler collector batch'leri geldikçe görünecek.`
+        : `${name} created. Data appears as the collector submits batches.`);
+    } else {
+      setNotice(isTr
+        ? `${name} oluşturuldu. Keşfi kartın üzerindeki “Keşfi Başlat” ile veya takvime göre çalıştırabilirsiniz.`
+        : `${name} created. Run discovery with “Start Discovery” on its card or wait for the schedule.`);
+    }
+  };
+
   const isBusy = busyAction !== null;
+  const collectorManagedNote = isTr
+    ? 'Bu entegrasyonun verisi collector üzerinden gelir; test ve keşif sunucuda çalıştırılmaz.'
+    : 'This integration is fed by a collector; tests and discovery do not run on the server.';
   const integrationsError = integrationsQuery.isError
     ? getErrorMessage(integrationsQuery.error)
     : null;
@@ -327,16 +371,15 @@ export const IntegrationsPage: React.FC = () => {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      <IntegrationWizardModal
-        isOpen={isWizardOpen}
-        onClose={() => setIsWizardOpen(false)}
-        onSuccess={() => {
-          void refreshAll();
-          setNotice(isTr
-            ? 'Entegrasyon oluşturuldu. Bağlantı durumu ve keşif işi aşağıda görüntülenebilir.'
-            : 'Integration created. Its connection status and discovery job are shown below.');
-        }}
-      />
+      {wizardTarget && (
+        <IntegrationWizardModal
+          key={wizardTarget.integration?.id ?? 'new'}
+          isOpen
+          integration={wizardTarget.integration}
+          onClose={() => setWizardTarget(null)}
+          onSuccess={handleWizardSuccess}
+        />
+      )}
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -368,7 +411,7 @@ export const IntegrationsPage: React.FC = () => {
             size="sm"
             className="gap-2"
             onClick={() => void handleBulkDiscover()}
-            disabled={isBusy || integrations.length === 0 || !canManage}
+            disabled={isBusy || !integrations.some((item) => !item.collectorManaged) || !canManage}
           >
             {busyAction === 'bulk' ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -380,7 +423,7 @@ export const IntegrationsPage: React.FC = () => {
           <Button
             variant="primary"
             size="sm"
-            onClick={() => setIsWizardOpen(true)}
+            onClick={() => setWizardTarget({ integration: null })}
             disabled={!canManage}
             title={canManage ? undefined : t('noPermission')}
             className="gap-2 bg-brand-primary"
@@ -500,7 +543,7 @@ export const IntegrationsPage: React.FC = () => {
             variant="primary"
             size="sm"
             className="mt-4 gap-2 bg-brand-primary"
-            onClick={() => setIsWizardOpen(true)}
+            onClick={() => setWizardTarget({ integration: null })}
             disabled={!canManage}
           >
             <Plus className="w-4 h-4" />
@@ -515,6 +558,7 @@ export const IntegrationsPage: React.FC = () => {
             const isDiscoverBusy = busyAction === `discover:${integration.id}`;
             const isToggleBusy = busyAction === `toggle:${integration.id}`;
             const isDeleteBusy = busyAction === `delete:${integration.id}`;
+            const isCollectorManaged = integration.collectorManaged === true;
 
             return (
               <Card key={integration.id} className="p-5 flex flex-col justify-between">
@@ -528,9 +572,15 @@ export const IntegrationsPage: React.FC = () => {
                         <h3 className="font-bold text-base text-neutral-900 dark:text-white truncate">
                           {integration.name}
                         </h3>
-                        <span className="text-xs text-neutral-500">
+                        <span className="text-xs text-neutral-500 block truncate">
                           {integration.adapter?.displayName ?? integration.adapterType}
                         </span>
+                        {isCollectorManaged && (
+                          <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 text-[10px] font-semibold text-blue-700 dark:text-blue-300">
+                            <Server className="w-3 h-3" />
+                            {isTr ? 'Collector yönetimli' : 'Collector-managed'}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -583,9 +633,16 @@ export const IntegrationsPage: React.FC = () => {
                     </div>
                     <div className="flex justify-between gap-2 py-1 border-b border-neutral-100 dark:border-dark-border">
                       <dt className="text-neutral-500">{isTr ? 'Takvim' : 'Schedule'}</dt>
-                      <dd className="font-mono text-neutral-700 dark:text-neutral-300 text-right">
-                        {integration.scheduleCron}
-                      </dd>
+                      {/* The scheduler never runs collector-managed integrations server-side. */}
+                      {integration.collectorManaged ? (
+                        <dd className="text-neutral-500 text-right">
+                          {isTr ? 'Collector gönderir' : 'Sent by collector'}
+                        </dd>
+                      ) : (
+                        <dd className="font-mono text-neutral-700 dark:text-neutral-300 text-right">
+                          {integration.scheduleCron}
+                        </dd>
+                      )}
                     </div>
                     <div className="flex justify-between gap-2 py-1 border-b border-neutral-100 dark:border-dark-border">
                       <dt className="text-neutral-500">{isTr ? 'Sonraki Keşif' : 'Next Discovery'}</dt>
@@ -643,15 +700,29 @@ export const IntegrationsPage: React.FC = () => {
                 <div className="mt-5 pt-4 border-t border-neutral-200 dark:border-dark-border flex flex-wrap items-center justify-between gap-2">
                   <span
                     className={`text-[11px] flex items-center gap-1 ${
-                      integration.lastTestSuccess
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-neutral-500'
+                      isCollectorManaged
+                        ? 'text-blue-600 dark:text-blue-400'
+                        : integration.lastTestSuccess === true
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : integration.lastTestSuccess === false
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-neutral-500'
                     }`}
                   >
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    {integration.lastTestSuccess
-                      ? (isTr ? 'Salt-okunur kimlik doğrulandı' : 'Read-only credential verified')
-                      : (isTr ? 'Bağlantı testi bekleniyor' : 'Awaiting connection test')}
+                    {isCollectorManaged ? (
+                      <Server className="w-3.5 h-3.5" />
+                    ) : integration.lastTestSuccess === false ? (
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                    ) : (
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                    )}
+                    {isCollectorManaged
+                      ? (isTr ? 'Test ve keşif collector tarafında yapılır' : 'Tests and discovery run on the collector')
+                      : integration.lastTestSuccess === true
+                        ? (isTr ? 'Salt-okunur kimlik doğrulandı' : 'Read-only credential verified')
+                        : integration.lastTestSuccess === false
+                          ? (isTr ? 'Bağlantı testi başarısız' : 'Connection test failed')
+                          : (isTr ? 'Bağlantı testi bekleniyor' : 'Awaiting connection test')}
                   </span>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -678,6 +749,17 @@ export const IntegrationsPage: React.FC = () => {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="px-2"
+                      onClick={() => setWizardTarget({ integration })}
+                      disabled={isBusy || !canManage}
+                      title={isTr ? 'Entegrasyonu düzenle' : 'Edit integration'}
+                      aria-label={isTr ? 'Entegrasyonu düzenle' : 'Edit integration'}
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       className="px-2 text-rose-600 hover:text-rose-700 dark:text-rose-400"
                       onClick={() => void handleDelete(integration)}
                       disabled={isBusy || !canManage}
@@ -693,7 +775,8 @@ export const IntegrationsPage: React.FC = () => {
                       variant="outline"
                       size="sm"
                       onClick={() => void handleTest(integration)}
-                      disabled={isBusy || !canManage}
+                      disabled={isBusy || !canManage || isCollectorManaged}
+                      title={isCollectorManaged ? collectorManagedNote : undefined}
                     >
                       {isTestBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                       {isTr ? 'Test Et' : 'Test'}
@@ -703,7 +786,8 @@ export const IntegrationsPage: React.FC = () => {
                       size="sm"
                       className="bg-brand-primary"
                       onClick={() => void handleDiscover(integration)}
-                      disabled={isBusy || !integration.isEnabled || !canManage}
+                      disabled={isBusy || !integration.isEnabled || !canManage || isCollectorManaged}
+                      title={isCollectorManaged ? collectorManagedNote : undefined}
                     >
                       {isDiscoverBusy ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -781,69 +865,115 @@ export const IntegrationsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100 dark:divide-dark-border">
-                {jobs.map((job) => (
-                  <tr key={job.id}>
-                    <td className="py-2.5 pl-1">
-                      <div className="font-semibold text-neutral-900 dark:text-white">
-                        {job.integrationName || '—'}
-                      </div>
-                      <div className="text-[10px] text-neutral-500">
-                        {job.adapterType} · {job.jobType}
-                      </div>
-                    </td>
-                    <td className={`py-2.5 font-semibold ${jobStatusClass(job.status)}`}>
-                      {jobStatusLabel(isTr, job.status)}
-                    </td>
-                    <td className="py-2.5 text-neutral-600 dark:text-neutral-300">
-                      <div>{job.currentPhase || '—'}</div>
-                      {job.currentMessage && (
-                        <div className="text-[10px] text-neutral-500 max-w-48 truncate" title={job.currentMessage}>
-                          {job.currentMessage}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-2.5">
-                      <div className="h-1.5 w-full rounded-full bg-neutral-100 dark:bg-dark-border overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-brand-primary transition-all"
-                          style={{
-                            width: `${Math.min(100, Math.max(0, job.progressPercent))}%`,
-                          }}
-                        />
-                      </div>
-                      <span className="text-[10px] text-neutral-500">
-                        {Math.min(100, Math.max(0, job.progressPercent))}%
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-4 text-right tabular-nums text-neutral-600 dark:text-neutral-300">
-                      {formatNumber(job.entitiesDiscovered)} /{' '}
-                      {formatNumber(job.relationshipsDiscovered)}
-                    </td>
-                    <td className="py-2.5 pl-4 whitespace-nowrap text-neutral-600 dark:text-neutral-300">
-                      <span title={formatDateTime(job.startedAt)}>
-                        {formatRelativeTime(job.startedAt)}
-                      </span>
-                    </td>
-                    <td className="py-2.5 text-right pr-1">
-                      {(job.status === 'Queued' || job.status === 'Running') && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="px-2 text-rose-600 hover:text-rose-700 dark:text-rose-400"
-                          onClick={() => void handleCancelJob(job)}
-                          disabled={isBusy || !canManage}
-                          title={isTr ? 'Keşif işini iptal et' : 'Cancel discovery job'}
-                        >
-                          {busyAction === `cancel:${job.id}` ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <X className="w-4 h-4" />
+                {jobs.map((job) => {
+                  const isExpanded = expandedJobId === job.id;
+                  const message = job.currentMessage ? describeJobMessage(job.currentMessage, isTr) : null;
+                  const issueCount = job.errors.length + job.warnings.length;
+                  return (
+                    <Fragment key={job.id}>
+                      <tr className={isExpanded ? 'bg-neutral-50 dark:bg-dark-bg/60' : undefined}>
+                        <td className="py-2.5 pl-1">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedJobId(isExpanded ? null : job.id)}
+                            aria-expanded={isExpanded}
+                            className="flex items-start gap-1.5 text-left"
+                            title={isTr ? 'İş ayrıntılarını göster' : 'Show job details'}
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="w-3.5 h-3.5 mt-0.5 shrink-0 text-neutral-400" />
+                            ) : (
+                              <ChevronRight className="w-3.5 h-3.5 mt-0.5 shrink-0 text-neutral-400" />
+                            )}
+                            <span>
+                              <span className="block font-semibold text-neutral-900 dark:text-white">
+                                {job.integrationName || '—'}
+                              </span>
+                              <span className="block text-[10px] text-neutral-500">
+                                {job.adapterType} · {job.jobType}
+                                {issueCount > 0 && (
+                                  <span
+                                    className={`ml-1 ${
+                                      job.errors.length > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'
+                                    }`}
+                                  >
+                                    ·{' '}
+                                    {[
+                                      job.errors.length > 0 &&
+                                        `${job.errors.length} ${isTr ? 'hata' : job.errors.length === 1 ? 'error' : 'errors'}`,
+                                      job.warnings.length > 0 &&
+                                        `${job.warnings.length} ${isTr ? 'uyarı' : job.warnings.length === 1 ? 'warning' : 'warnings'}`,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(', ')}
+                                  </span>
+                                )}
+                              </span>
+                            </span>
+                          </button>
+                        </td>
+                        <td className={`py-2.5 font-semibold ${jobStatusClass(job.status)}`}>
+                          {jobStatusLabel(isTr, job.status)}
+                        </td>
+                        <td className="py-2.5 text-neutral-600 dark:text-neutral-300">
+                          <div>{jobPhaseLabel(job.currentPhase, isTr)}</div>
+                          {message && (
+                            <div className="text-[10px] text-neutral-500 max-w-48 truncate" title={job.currentMessage}>
+                              {message.label ?? message.detail}
+                            </div>
                           )}
-                        </Button>
+                        </td>
+                        <td className="py-2.5">
+                          <div className="h-1.5 w-full rounded-full bg-neutral-100 dark:bg-dark-border overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-brand-primary transition-all"
+                              style={{
+                                width: `${Math.min(100, Math.max(0, job.progressPercent))}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="text-[10px] text-neutral-500">
+                            {Math.min(100, Math.max(0, job.progressPercent))}%
+                          </span>
+                        </td>
+                        <td className="py-2.5 pr-4 text-right tabular-nums text-neutral-600 dark:text-neutral-300">
+                          {formatNumber(job.entitiesDiscovered)} /{' '}
+                          {formatNumber(job.relationshipsDiscovered)}
+                        </td>
+                        <td className="py-2.5 pl-4 whitespace-nowrap text-neutral-600 dark:text-neutral-300">
+                          <span title={formatDateTime(job.startedAt)}>
+                            {formatRelativeTime(job.startedAt)}
+                          </span>
+                        </td>
+                        <td className="py-2.5 text-right pr-1">
+                          {(job.status === 'Queued' || job.status === 'Running') && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="px-2 text-rose-600 hover:text-rose-700 dark:text-rose-400"
+                              onClick={() => void handleCancelJob(job)}
+                              disabled={isBusy || !canManage}
+                              title={isTr ? 'Keşif işini iptal et' : 'Cancel discovery job'}
+                            >
+                              {busyAction === `cancel:${job.id}` ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <X className="w-4 h-4" />
+                              )}
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="bg-neutral-50 dark:bg-dark-bg/60">
+                          <td colSpan={7} className="px-3 pb-4 pt-1">
+                            <JobDetails job={job} isTr={isTr} />
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                  </tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -857,6 +987,85 @@ export const IntegrationsPage: React.FC = () => {
           </p>
         )}
       </Card>
+    </div>
+  );
+};
+
+/** Expanded row of the job table: errors, warnings, statistics and run metadata. */
+const JobDetails: React.FC<{ job: DiscoveryJob; isTr: boolean }> = ({ job, isTr }) => {
+  const statistics = Object.entries(job.statistics ?? {});
+  const renderMessages = (messages: string[], tone: 'error' | 'warning') => (
+    <ul className="space-y-1.5">
+      {messages.map((raw, index) => {
+        const { label, detail } = describeJobMessage(raw, isTr);
+        return (
+          <li
+            key={`${index}-${raw}`}
+            className={`p-2 rounded border text-[11px] break-words ${
+              tone === 'error'
+                ? 'border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-rose-800 dark:text-rose-300'
+                : 'border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300'
+            }`}
+          >
+            {label && <span className="font-semibold">{label} </span>}
+            <span className={label ? 'opacity-80 font-mono' : undefined}>{detail}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+      <dl className="space-y-1.5">
+        {[
+          [isTr ? 'İsteyen' : 'Requested by', job.requestedBy || '—'],
+          [isTr ? 'Başlangıç' : 'Started', formatDateTime(job.startedAt)],
+          [isTr ? 'Bitiş' : 'Completed', job.completedAt ? formatDateTime(job.completedAt) : '—'],
+          [isTr ? 'Süre' : 'Duration', formatDuration(job.durationMs)],
+          [isTr ? 'Son mesaj' : 'Last message', job.currentMessage || '—'],
+        ].map(([term, value]) => (
+          <div key={term} className="flex justify-between gap-3 border-b border-neutral-100 dark:border-dark-border pb-1">
+            <dt className="text-neutral-500 shrink-0">{term}</dt>
+            <dd className="text-neutral-800 dark:text-neutral-200 text-right break-words min-w-0">{value}</dd>
+          </div>
+        ))}
+        {statistics.length > 0 && (
+          <div className="pt-1">
+            <dt className="text-neutral-500 mb-1">{isTr ? 'İstatistikler' : 'Statistics'}</dt>
+            <dd className="flex flex-wrap gap-1.5">
+              {statistics.map(([key, value]) => (
+                <span
+                  key={key}
+                  className="px-2 py-0.5 rounded bg-neutral-100 dark:bg-dark-border text-[10px] text-neutral-700 dark:text-neutral-300"
+                >
+                  {key}: <span className="font-semibold tabular-nums">{formatNumber(value)}</span>
+                </span>
+              ))}
+            </dd>
+          </div>
+        )}
+      </dl>
+      <div>
+        <h4 className="font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
+          {isTr ? 'Hatalar' : 'Errors'} ({job.errors?.length ?? 0})
+        </h4>
+        {job.errors?.length ? (
+          renderMessages(job.errors, 'error')
+        ) : (
+          <p className="text-neutral-500">{isTr ? 'Hata kaydedilmedi.' : 'No errors recorded.'}</p>
+        )}
+      </div>
+      <div>
+        <h4 className="font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
+          {isTr ? 'Uyarılar' : 'Warnings'} ({job.warnings?.length ?? 0})
+        </h4>
+        {job.warnings?.length ? (
+          renderMessages(job.warnings, 'warning')
+        ) : (
+          <p className="text-neutral-500">{isTr ? 'Uyarı kaydedilmedi.' : 'No warnings recorded.'}</p>
+        )}
+      </div>
     </div>
   );
 };

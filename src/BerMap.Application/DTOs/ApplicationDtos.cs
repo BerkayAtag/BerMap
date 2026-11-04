@@ -25,7 +25,7 @@ public class RecentChangeDto
     public Guid Id { get; set; }
     public string EntityName { get; set; } = string.Empty;
     public string EntityType { get; set; } = string.Empty;
-    public string ChangeType { get; set; } = string.Empty;
+    public string ChangeType { get; set; } = string.Empty; // Discovered, StatusChanged
     public string Source { get; set; } = string.Empty;
     public string Status { get; set; } = "healthy";
     public DateTime Timestamp { get; set; }
@@ -77,9 +77,9 @@ public class GraphQueryResultDto
 
 public class SimulationRunRequest
 {
-    public Guid TargetNodeId { get; set; }
-    public string ScenarioType { get; set; } = "host_failure"; // host_failure, datastore_outage, network_cut
-    public Guid? SnapshotId { get; set; }
+    // Nullable so a missing target is reported as a validation error (400), not a 404.
+    public Guid? TargetNodeId { get; set; }
+    public string ScenarioType { get; set; } = "host_failure"; // host_failure, datastore_failure, network_partition, workload_outage
 }
 
 public class ImpactAnalysisResultDto
@@ -92,7 +92,21 @@ public class ImpactAnalysisResultDto
     public List<ImpactedEntityDto> ProbableImpacts { get; set; } = new();
     public List<ImpactedEntityDto> PossibleImpacts { get; set; } = new();
     public ClusterHeadroomDto ClusterHeadroom { get; set; } = new();
+
+    /// <summary>English texts of <see cref="RecommendationItems"/>, in the same order.</summary>
     public List<string> Recommendations { get; set; } = new();
+
+    /// <summary>Machine-readable recommendations the console localises by code.</summary>
+    public List<RecommendationItemDto> RecommendationItems { get; set; } = new();
+}
+
+public class RecommendationItemDto
+{
+    // no_direct_impact, metrics_missing, failover_not_confirmed, headroom_sufficient,
+    // workloads_unavailable, dependents_degrade, ha_disabled, single_point_of_failure
+    public string Code { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
+    public Dictionary<string, string> Values { get; set; } = new();
 }
 
 public class ImpactedEntityDto
@@ -110,4 +124,12 @@ public class ClusterHeadroomDto
     public double RemainingRamPercent { get; set; }
     public bool HasCapacityForFailover { get; set; }
     public string BottleneckResource { get; set; } = "None";
+
+    /// <summary>Cpu, Ram, None, Unknown (metrics missing) or NotApplicable (no single compute cluster).</summary>
+    public string BottleneckCode { get; set; } = "Unknown";
+
+    public string ClusterName { get; set; } = string.Empty;
+
+    /// <summary>True when the failed host's capacity was subtracted (N-1 headroom).</summary>
+    public bool IsPostFailure { get; set; }
 }

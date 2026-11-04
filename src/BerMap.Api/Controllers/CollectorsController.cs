@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
+using BerMap.Application.Services.Integrations;
 using BerMap.Contracts;
 using BerMap.Domain.Entities;
 using BerMap.Domain.Enums;
@@ -27,6 +28,7 @@ public class CollectorsController : ControllerBase
     private readonly BerMapDbContext _context;
     private readonly IDiscoveryIngestionService _ingestionService;
     private readonly IConfiguration _configuration;
+    private readonly IAuditService _auditService;
 
     // In-memory heartbeat cache for sub-second status retrieval. Durable state
     // is persisted on the collector row, so a restart loses only the last few
@@ -36,11 +38,13 @@ public class CollectorsController : ControllerBase
     public CollectorsController(
         BerMapDbContext context,
         IDiscoveryIngestionService ingestionService,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IAuditService auditService)
     {
         _context = context;
         _ingestionService = ingestionService;
         _configuration = configuration;
+        _auditService = auditService;
     }
 
     [HttpGet]
@@ -69,6 +73,8 @@ public class CollectorsController : ControllerBase
                 version = c.Version,
                 lastHeartbeatAt = c.LastHeartbeatAt,
                 supportedAdapters = adapters,
+                // A collector that never sent a heartbeat has no measured
+                // metrics; null keeps the console from showing 0% as a value.
                 metrics = heartbeat != null
                     ? new
                     {
@@ -76,16 +82,42 @@ public class CollectorsController : ControllerBase
                         memoryUsagePercent = heartbeat.MemoryUsagePercent,
                         queuedMessages = heartbeat.QueuedMessagesCount
                     }
-                    : new
-                    {
-                        cpuUsagePercent = metrics.GetValueOrDefault("cpuUsagePercent"),
-                        memoryUsagePercent = metrics.GetValueOrDefault("memoryUsagePercent"),
-                        queuedMessages = (int)metrics.GetValueOrDefault("queuedMessages")
-                    }
+                    : metrics.ContainsKey("cpuUsagePercent")
+                        ? new
+                        {
+                            cpuUsagePercent = metrics.GetValueOrDefault("cpuUsagePercent"),
+                            memoryUsagePercent = metrics.GetValueOrDefault("memoryUsagePercent"),
+                            queuedMessages = (int)metrics.GetValueOrDefault("queuedMessages")
+                        }
+                        : null
             };
         });
 
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Removes a retired or re-enrolled collector. Its discovered data stays:
+    /// it belongs to the integrations the collector fed, not to the collector.
+    /// </summary>
+    [Authorize(Policy = AuthorizationPolicies.ManageIntegrations)]
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> DeleteCollector(Guid id, CancellationToken cancellationToken)
+    {
+        var collector = await _context.Collectors.FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
+        if (collector == null)
+            return NotFound();
+
+        _context.Collectors.Remove(collector);
+        await _context.SaveChangesAsync(cancellationToken);
+        Heartbeats.TryRemove(id, out _);
+
+        await _auditService.LogAsync(
+            this.GetActor(), this.GetActor(), "Collector.Deleted", nameof(Collector), id.ToString(),
+            JsonSerializer.Serialize(new { collector.Name, collector.Hostname }),
+            HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty, true, cancellationToken);
+
+        return NoContent();
     }
 
     [AllowAnonymous]
@@ -253,9 +285,8 @@ public class CollectorsController : ControllerBase
             // Collector-fed integrations report health the same way as
             // server-side discovery does, otherwise they stay "Inactive" forever.
             var integration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, CancellationToken.None);
-            integration.Status = errors.Count == 0
-                ? (integration.IsEnabled ? IntegrationStatus.Active : IntegrationStatus.Inactive)
-                : IntegrationStatus.Degraded;
+            integration.Status = IntegrationStatusRules.AfterRun(
+                integration.IsEnabled, errors.Count == 0 ? IntegrationStatus.Active : IntegrationStatus.Degraded);
             integration.LastError = errors.FirstOrDefault() ?? string.Empty;
             integration.LastErrorAt = errors.Count > 0 ? DateTime.UtcNow : null;
             integration.LastJobId = job.Id;

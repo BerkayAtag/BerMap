@@ -527,7 +527,16 @@ public class EntityReconciliationService : IEntityReconciliationService
             existing.NodeType = discoveredType;
 
         if (!string.IsNullOrWhiteSpace(discovered.Status))
-            existing.Status = NormalizeStatus(discovered.Status);
+        {
+            // Only a real transition counts as a status change. A new node is
+            // created with its first status, so it stays without StatusChangedAt.
+            var status = NormalizeStatus(discovered.Status);
+            if (!string.Equals(existing.Status, status, StringComparison.Ordinal))
+            {
+                existing.Status = status;
+                existing.StatusChangedAt = DateTime.UtcNow;
+            }
+        }
 
         var sourceName = ResolveSourceName(discovered);
         if (!string.IsNullOrWhiteSpace(sourceName) &&

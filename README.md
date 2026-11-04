@@ -11,7 +11,7 @@
 
 **BerMap** is an enterprise-grade infrastructure discovery, dependency mapping, blast-radius impact analysis, and what-if simulation platform designed from the ground up for strictly on-premises, air-gapped corporate environments (banking, telecommunications, healthcare, defense, and public utilities).
 
-BerMap automatically connects to enterprise infrastructure systems (Active Directory, VMware vCenter, Zabbix, Microsoft SCCM/MECM, SQL Server, and Network devices), reconciles physical and virtual assets into a unified graph data model, visualizes complex dependencies in real time, and allows systems engineers to **simulate changes and failures before touching production** via the integrated **Simulation Studio (BerSim)**.
+BerMap connects to enterprise infrastructure systems (Active Directory and VMware vCenter today; Zabbix, Microsoft SCCM/MECM, SQL Server and network-device adapters are planned), reconciles physical and virtual assets into a unified graph data model, visualizes complex dependencies in real time, and allows systems engineers to **simulate changes and failures before touching production** via the integrated **Simulation Studio (BerSim)**.
 
 ---
 
@@ -39,12 +39,11 @@ BerMap automatically connects to enterprise infrastructure systems (Active Direc
 ```text
 BerMap/
 ├── src/
-│   ├── BerMap.Api/              # ASP.NET Core Web API host & controllers
+│   ├── BerMap.Api/              # ASP.NET Core Web API host, controllers, discovery scheduler & job runner
 │   ├── BerMap.Application/      # CQRS handlers, DTOs, domain service interfaces
 │   ├── BerMap.Domain/           # Pure domain entities, value objects, enums
 │   ├── BerMap.Infrastructure/   # EF Core DbContext, PostgreSQL repos, audit, security
 │   ├── BerMap.Contracts/        # Shared DTOs, integration interfaces, collector protocol
-│   ├── BerMap.Worker/           # Background discovery & synchronization worker
 │   ├── BerMap.Collector/        # Standalone, outbound-only collection agent
 │   ├── BerMap.Simulation/       # Deterministic what-if simulation engine (BerSim)
 │   ├── BerMap.Integrations/     # Integration adapter implementations

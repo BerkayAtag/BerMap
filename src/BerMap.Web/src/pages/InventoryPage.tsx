@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -12,6 +12,7 @@ import {
   GitMerge,
   Info,
   Loader2,
+  Play,
   RefreshCw,
   Search,
   Server,
@@ -24,14 +25,16 @@ import {
   formatProperty,
   formatRelativeTime,
   getErrorMessage,
+  getErrorStatus,
   shortId,
   toNodeStatus,
 } from '@/lib/format';
+import { downloadCsv } from '@/lib/csv';
 import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
 import { useCanOperate } from '@/stores/authStore';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import type {
   InventoryNode,
   InventoryNodeDetail,
@@ -96,24 +99,52 @@ function findProperty(node: InventoryNode, keys: string[]): string | null {
   return entry ? formatProperty(entry[1]) : null;
 }
 
-function csvCell(value: unknown): string {
-  return `"${(value == null ? '' : String(value)).replace(/"/g, '""')}"`;
-}
-
 interface FieldDisplayProps {
   label: string;
   value?: string | null;
   mono?: boolean;
+  /** Raw English keys (source properties): uppercase them with English casing rules. */
+  englishLabel?: boolean;
 }
 
-function FieldDisplay({ label, value, mono = false }: FieldDisplayProps) {
+function FieldDisplay({ label, value, mono = false, englishLabel = false }: FieldDisplayProps) {
   return (
     <div>
-      <dt className="text-[11px] uppercase tracking-wide text-neutral-500">{label}</dt>
+      <dt lang={englishLabel ? 'en' : undefined} className="text-[11px] uppercase tracking-wide text-neutral-500">
+        {label}
+      </dt>
       <dd className={`mt-0.5 text-sm text-neutral-900 dark:text-neutral-100 break-words ${mono ? 'font-mono text-xs' : ''}`}>
         {value || '—'}
       </dd>
     </div>
+  );
+}
+
+interface ReviewNodeLinkProps {
+  id?: string | null;
+  name: string;
+  currentId: string;
+  onOpen: (id: string) => void;
+}
+
+/**
+ * A node named in a reconciliation review. After a merge or dismissal the other
+ * record (and its PossibleDuplicate edge) may be gone; opening it then shows the
+ * modal's not-found state instead of failing.
+ */
+function ReviewNodeLink({ id, name, currentId, onOpen }: ReviewNodeLinkProps) {
+  const label = name || (id ? shortId(id) : '—');
+  if (!id || id === currentId) {
+    return <div className="font-medium text-neutral-800 dark:text-neutral-200">{label}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(id)}
+      className="font-medium text-left text-brand-primary dark:text-brand-primary-dark hover:underline"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -124,36 +155,66 @@ export const InventoryPage: React.FC = () => {
   const queryClient = useQueryClient();
   const canOperate = useCanOperate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialQuery = searchParams.get('q') ?? '';
 
-  const [queryInput, setQueryInput] = useState(initialQuery);
-  const [query, setQuery] = useState(initialQuery);
+  // The search text (?q=), the open entity (?node=) and the review tab (?review=1)
+  // live in the URL, so reloading or sharing the page keeps them.
+  const query = searchParams.get('q')?.trim() ?? '';
+  const selectedNodeId = searchParams.get('node') || null;
+  const needsReview = searchParams.get('review') === '1';
+
+  const [queryInput, setQueryInput] = useState(query);
   const [nodeType, setNodeType] = useState('');
   const [status, setStatus] = useState('');
-  const [needsReview, setNeedsReview] = useState(false);
   const [staleFilter, setStaleFilter] = useState<StaleFilter>('all');
   const [page, setPage] = useState(1);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(searchParams.get('node'));
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
   const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
   const [resolvingReviewId, setResolvingReviewId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // Deep links from the global search (/inventory?node=<id> or ?q=<text>).
-  const linkedNodeId = searchParams.get('node');
-  const linkedQuery = searchParams.get('q');
+  // URL updates made by this page itself; any other change of the query string
+  // is a deep link (global search, dashboard, map, back/forward).
+  const ownSearch = useRef<string | null>(null);
+  const updateParams = useCallback(
+    (mutate: (params: URLSearchParams) => void) => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          mutate(next);
+          // An unchanged URL triggers no effect run, so only real changes are marked.
+          if (next.toString() !== current.toString()) ownSearch.current = next.toString();
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const searchKey = searchParams.toString();
   useEffect(() => {
-    if (linkedNodeId) setSelectedNodeId(linkedNodeId);
-    if (linkedQuery !== null) {
-      setQueryInput(linkedQuery);
-      setQuery(linkedQuery.trim());
-      setPage(1);
+    if (ownSearch.current === searchKey) {
+      ownSearch.current = null;
+      return;
     }
-    if (linkedNodeId || linkedQuery !== null) {
-      setSearchParams({}, { replace: true });
-    }
-  }, [linkedNodeId, linkedQuery, setSearchParams]);
+    // A deep link starts a fresh search: the link's own text, no leftover filters.
+    const linked = new URLSearchParams(searchKey);
+    setQueryInput(linked.get('q') ?? '');
+    setNodeType('');
+    setStatus('');
+    setStaleFilter('all');
+    setPage(1);
+  }, [searchKey]);
+
+  const setSelectedNodeId = useCallback(
+    (id: string | null) =>
+      updateParams((params) => {
+        if (id) params.set('node', id);
+        else params.delete('node');
+      }),
+    [updateParams],
+  );
 
   // Debounce the search box; the page is reset in the same update so a filter
   // change triggers exactly one request.
@@ -161,12 +222,15 @@ export const InventoryPage: React.FC = () => {
     const timer = window.setTimeout(() => {
       const next = queryInput.trim();
       if (next !== query) {
-        setQuery(next);
+        updateParams((params) => {
+          if (next) params.set('q', next);
+          else params.delete('q');
+        });
         setPage(1);
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [queryInput, query]);
+  }, [queryInput, query, updateParams]);
 
   const changeNodeType = (value: string) => {
     setNodeType(value);
@@ -177,7 +241,10 @@ export const InventoryPage: React.FC = () => {
     setPage(1);
   };
   const changeNeedsReview = (value: boolean) => {
-    setNeedsReview(value);
+    updateParams((params) => {
+      if (value) params.set('review', '1');
+      else params.delete('review');
+    });
     setPage(1);
   };
   const changeStaleFilter = (value: StaleFilter) => {
@@ -207,9 +274,15 @@ export const InventoryPage: React.FC = () => {
 
   const nodeDetailQuery = useQuery<InventoryNodeDetail>({
     queryKey: ['inventory', 'node', selectedNodeId],
-    queryFn: () => api.get<InventoryNodeDetail>(`/inventory/nodes/${selectedNodeId}`),
+    queryFn: () => api.get<InventoryNodeDetail>(`/inventory/nodes/${encodeURIComponent(selectedNodeId ?? '')}`),
     enabled: !!selectedNodeId,
     staleTime: 5_000,
+    // An unknown or malformed id will not appear by retrying.
+    retry: (failureCount, error) => {
+      const status = getErrorStatus(error);
+      if (status !== undefined && status >= 400 && status < 500) return false;
+      return failureCount < 2;
+    },
   });
 
   const data = nodesQuery.data;
@@ -229,10 +302,12 @@ export const InventoryPage: React.FC = () => {
 
   const handleClearFilters = () => {
     setQueryInput('');
-    setQuery('');
+    updateParams((params) => {
+      params.delete('q');
+      params.delete('review');
+    });
     setNodeType('');
     setStatus('');
-    setNeedsReview(false);
     setStaleFilter('all');
     setPage(1);
   };
@@ -275,16 +350,8 @@ export const InventoryPage: React.FC = () => {
       node.isStale ? 'yes' : 'no',
       node.needsReview ? 'yes' : 'no',
     ]);
-    const csv = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
-    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `bermap-inventory-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    // Formula-safe cells and a UTF-8 BOM (discovery data may start with =, +, - or @).
+    downloadCsv(`bermap-inventory-${new Date().toISOString().slice(0, 10)}.csv`, [header, ...rows]);
   };
 
   const handleResolveReview = async (
@@ -328,7 +395,9 @@ export const InventoryPage: React.FC = () => {
         );
       } else {
         setNotice(
-          isTr ? 'Uzlaştırma incelemesi yok sayıldı.' : 'Reconciliation review dismissed.',
+          isTr
+            ? 'Uzlaştırma incelemesi yok sayıldı; iki kayıt arasındaki olası yinelenen ilişkisi kaldırıldı.'
+            : 'Reconciliation review dismissed; the possible-duplicate link between the two records was removed.',
         );
       }
     } catch (error) {
@@ -339,8 +408,12 @@ export const InventoryPage: React.FC = () => {
   };
 
   const nodesError = nodesQuery.isError ? getErrorMessage(nodesQuery.error) : null;
-  const detailError = nodeDetailQuery.isError ? getErrorMessage(nodeDetailQuery.error) : null;
-  const detail = nodeDetailQuery.data;
+  const detailStatus = nodeDetailQuery.isError ? getErrorStatus(nodeDetailQuery.error) : undefined;
+  // 404 (unknown id) and 400 (malformed id) both mean the linked entity does not exist.
+  const detailNotFound = detailStatus === 404 || detailStatus === 400;
+  const detailError = nodeDetailQuery.isError && !detailNotFound ? getErrorMessage(nodeDetailQuery.error) : null;
+  // Keep showing the previous node only while it matches the URL.
+  const detail = nodeDetailQuery.data?.node.id === selectedNodeId ? nodeDetailQuery.data : undefined;
 
   const firstRecordIndex = data && data.totalCount > 0 ? (data.page - 1) * data.pageSize + 1 : 0;
   const lastRecordIndex = data ? Math.min(data.page * data.pageSize, data.totalCount) : 0;
@@ -667,7 +740,7 @@ export const InventoryPage: React.FC = () => {
                               </div>
                             </div>
                           </td>
-                          <td className="py-3 text-neutral-600 dark:text-neutral-300 text-xs">{node.nodeType}</td>
+                          <td lang="en" className="py-3 text-neutral-600 dark:text-neutral-300 text-xs">{node.nodeType}</td>
                           <td className="py-3 text-neutral-600 dark:text-neutral-300 text-xs">{operatingSystem || '—'}</td>
                           <td className="py-3 font-mono text-xs text-neutral-600 dark:text-neutral-400">
                             {node.ipAddress || '—'}
@@ -787,7 +860,12 @@ export const InventoryPage: React.FC = () => {
                 </div>
                 <div className="min-w-0">
                   <h2 className="font-bold text-lg text-neutral-900 dark:text-white truncate">
-                    {detail?.node.name ?? (isTr ? 'Varlık detayı yükleniyor...' : 'Loading entity detail...')}
+                    {detail?.node.name ??
+                      (detailNotFound
+                        ? isTr ? 'Varlık bulunamadı' : 'Entity not found'
+                        : detailError
+                          ? isTr ? 'Varlık detayı alınamadı' : 'Entity detail unavailable'
+                          : isTr ? 'Varlık detayı yükleniyor...' : 'Loading entity detail...')}
                   </h2>
                   <p className="text-xs text-neutral-500 font-mono truncate">
                     {detail?.node.fqdn || selectedNodeId}
@@ -817,6 +895,21 @@ export const InventoryPage: React.FC = () => {
                   <div className="h-24 rounded-lg bg-neutral-100 dark:bg-dark-border animate-pulse" />
                   <div className="h-32 rounded-lg bg-neutral-100 dark:bg-dark-border animate-pulse" />
                 </div>
+              ) : detailNotFound ? (
+                <div className="p-6 rounded-lg border border-neutral-200 dark:border-dark-border bg-neutral-50 dark:bg-dark-bg text-center">
+                  <Server className="w-8 h-8 mx-auto text-neutral-300 dark:text-neutral-600" aria-hidden="true" />
+                  <p className="mt-2 text-sm font-medium text-neutral-800 dark:text-neutral-200">
+                    {isTr ? 'Bu bağlantıdaki varlık envanterde yok.' : 'The entity in this link is not in the inventory.'}
+                  </p>
+                  <p className="mt-1 text-xs text-neutral-500">
+                    {isTr
+                      ? 'Kayıt birleştirilmiş veya silinmiş olabilir. Listeden arayarak bulabilirsiniz.'
+                      : 'The record may have been merged or removed. Search the list to find it.'}
+                  </p>
+                  <Button variant="outline" size="sm" className="mt-3" onClick={() => setSelectedNodeId(null)}>
+                    {isTr ? 'Listeye dön' : 'Back to the list'}
+                  </Button>
+                </div>
               ) : detailError ? (
                 <div className="p-4 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-sm text-rose-700 dark:text-rose-300">
                   <div className="flex items-center gap-2">
@@ -845,7 +938,7 @@ export const InventoryPage: React.FC = () => {
                       <StatusIndicator status={toNodeStatus(detail.node.status)} size="sm" />
                       {statusLabel(detail.node.status)}
                     </span>
-                    <span className="text-xs px-2.5 py-1 rounded-full bg-neutral-100 dark:bg-dark-border text-neutral-600 dark:text-neutral-400">
+                    <span lang="en" className="text-xs px-2.5 py-1 rounded-full bg-neutral-100 dark:bg-dark-border text-neutral-600 dark:text-neutral-400">
                       {detail.node.nodeType}
                     </span>
                     <span className="text-xs px-2.5 py-1 rounded-full bg-brand-primary/10 text-brand-primary dark:text-brand-primary-dark">
@@ -857,6 +950,13 @@ export const InventoryPage: React.FC = () => {
                         {isTr ? 'Uzlaştırma incelemesi bekliyor' : 'Awaiting reconciliation review'}
                       </span>
                     )}
+                    <Link
+                      to={`/simulation?target=${encodeURIComponent(detail.node.id)}`}
+                      className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-brand-primary dark:text-brand-primary-dark hover:underline"
+                    >
+                      <Play className="w-3.5 h-3.5" aria-hidden="true" />
+                      {isTr ? 'Simülasyon' : 'Simulation'}
+                    </Link>
                   </div>
 
                   <section>
@@ -864,12 +964,12 @@ export const InventoryPage: React.FC = () => {
                       {isTr ? 'Kimlik ve Keşif Bilgileri' : 'Identity & Discovery Info'}
                     </h3>
                     <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4 rounded-lg border border-neutral-200 dark:border-dark-border bg-neutral-50 dark:bg-dark-bg">
-                      <FieldDisplay label="FQDN" value={detail.node.fqdn} mono />
+                      <FieldDisplay label="FQDN" value={detail.node.fqdn} mono englishLabel />
                       <FieldDisplay label={isTr ? 'IP Adresi' : 'IP Address'} value={detail.node.ipAddress} mono />
                       <FieldDisplay label={isTr ? 'MAC Adresi' : 'MAC Address'} value={detail.node.macAddress} mono />
-                      <FieldDisplay label="BIOS UUID" value={detail.node.biosUuid} mono />
-                      <FieldDisplay label="VM Instance UUID" value={detail.node.vmInstanceUuid} mono />
-                      <FieldDisplay label="Domain SID" value={detail.node.domainSid} mono />
+                      <FieldDisplay label="BIOS UUID" value={detail.node.biosUuid} mono englishLabel />
+                      <FieldDisplay label="VM Instance UUID" value={detail.node.vmInstanceUuid} mono englishLabel />
+                      <FieldDisplay label="Domain SID" value={detail.node.domainSid} mono englishLabel />
                       <FieldDisplay label={isTr ? 'İlk Görülme' : 'First Seen'} value={formatDateTime(detail.node.firstSeen)} />
                       <FieldDisplay label={isTr ? 'Son Görülme' : 'Last Seen'} value={formatDateTime(detail.node.lastSeen)} />
                       <FieldDisplay
@@ -898,7 +998,7 @@ export const InventoryPage: React.FC = () => {
                           .filter(([key]) => !key.startsWith('_'))
                           .slice(0, 18)
                           .map(([key, value]) => (
-                            <FieldDisplay key={key} label={key} value={formatProperty(value)} />
+                            <FieldDisplay key={key} label={key} value={formatProperty(value)} englishLabel />
                           ))}
                       </dl>
                     </section>
@@ -968,20 +1068,38 @@ export const InventoryPage: React.FC = () => {
                       <div className="space-y-2">
                         {detail.relationships.slice(0, 25).map((relationship) => {
                           const isSource = relationship.sourceNodeId === detail.node.id;
+                          const otherId = isSource ? relationship.targetNodeId : relationship.sourceNodeId;
+                          const otherName =
+                            (isSource ? relationship.targetNodeName : relationship.sourceNodeName) || shortId(otherId);
                           return (
                             <div
                               key={relationship.id}
-                              className="p-3 rounded-lg border border-neutral-200 dark:border-dark-border bg-white dark:bg-dark-card text-xs"
+                              className={`p-3 rounded-lg border bg-white dark:bg-dark-card text-xs ${
+                                relationship.isStale
+                                  ? 'border-dashed border-neutral-300 dark:border-dark-border opacity-70'
+                                  : 'border-neutral-200 dark:border-dark-border'
+                              }`}
                             >
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-dark-border text-neutral-600 dark:text-neutral-300">
+                                <span lang="en" className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-dark-border text-neutral-600 dark:text-neutral-300">
                                   {relationship.relationshipType}
                                 </span>
                                 <span className="text-neutral-700 dark:text-neutral-200">
                                   {isSource ? '→' : '←'}{' '}
-                                  {isSource ? relationship.targetNodeName : relationship.sourceNodeName}
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedNodeId(otherId)}
+                                    className="font-medium hover:underline text-brand-primary dark:text-brand-primary-dark"
+                                  >
+                                    {otherName}
+                                  </button>
                                 </span>
-                                <span className="ml-auto text-[10px] text-neutral-500">
+                                {relationship.isStale && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 font-semibold">
+                                    {isTr ? 'Bayat' : 'Stale'}
+                                  </span>
+                                )}
+                                <span lang="en" className="ml-auto text-[10px] text-neutral-500">
                                   {relationship.confidenceLevel}
                                 </span>
                               </div>
@@ -1055,17 +1173,23 @@ export const InventoryPage: React.FC = () => {
                                   <div className="text-[10px] uppercase text-neutral-500">
                                     {isTr ? 'Keşfedilen Düğüm' : 'Discovered Node'}
                                   </div>
-                                  <div className="font-medium text-neutral-800 dark:text-neutral-200">
-                                    {review.createdNodeName || '—'}
-                                  </div>
+                                  <ReviewNodeLink
+                                    id={review.createdNodeId}
+                                    name={review.createdNodeName}
+                                    currentId={detail.node.id}
+                                    onOpen={setSelectedNodeId}
+                                  />
                                 </div>
                                 <div>
                                   <div className="text-[10px] uppercase text-neutral-500">
                                     {isTr ? 'Aday Düğüm' : 'Candidate Node'}
                                   </div>
-                                  <div className="font-medium text-neutral-800 dark:text-neutral-200">
-                                    {review.candidateNodeName || '—'}
-                                  </div>
+                                  <ReviewNodeLink
+                                    id={review.candidateNodeId}
+                                    name={review.candidateNodeName}
+                                    currentId={detail.node.id}
+                                    onOpen={setSelectedNodeId}
+                                  />
                                 </div>
                               </div>
 

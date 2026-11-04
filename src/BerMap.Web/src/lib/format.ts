@@ -116,7 +116,25 @@ export function formatPercent(value?: number | null): string {
   return `${(value ?? 0).toLocaleString(intlLocale(), { maximumFractionDigits: 1 })}%`;
 }
 
+/** True when the request never got an HTTP response (offline, DNS, proxy reset, CORS). */
+export function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError;
+}
+
+/** HTTP status of an ApiError, or undefined for network and other errors. */
+export function getErrorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
 export function getErrorMessage(error: unknown): string {
+  // fetch() rejects with a browser-specific English TypeError ("Failed to fetch",
+  // "Load failed"); show a localized message instead.
+  if (isNetworkError(error)) {
+    return currentLocale() === 'tr'
+      ? 'Sunucuya ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.'
+      : 'The server could not be reached. Check your connection and try again.';
+  }
   if (typeof error === 'object' && error !== null && 'message' in error) {
     const message = (error as { message?: unknown }).message;
     if (typeof message === 'string' && message.trim().length > 0) {

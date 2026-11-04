@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using BerMap.Application.DTOs;
+using BerMap.Application.Interfaces;
 using BerMap.Application.Services;
 using BerMap.Api.Security;
 using Microsoft.AspNetCore.Authorization;
@@ -15,10 +17,12 @@ namespace BerMap.Api.Controllers;
 public class SnapshotsController : ControllerBase
 {
     private readonly ISnapshotService _snapshotService;
+    private readonly IAuditService _auditService;
 
-    public SnapshotsController(ISnapshotService snapshotService)
+    public SnapshotsController(ISnapshotService snapshotService, IAuditService auditService)
     {
         _snapshotService = snapshotService;
+        _auditService = auditService;
     }
 
     [HttpGet]
@@ -35,6 +39,16 @@ public class SnapshotsController : ControllerBase
     {
         var createdBy = this.GetActor();
         var snapshot = await _snapshotService.CreateSnapshotAsync(request, createdBy, cancellationToken);
+        await _auditService.LogAsync(
+            createdBy, createdBy, "Snapshot.Created", "Snapshot", snapshot.Id.ToString(),
+            JsonSerializer.Serialize(new
+            {
+                snapshot.Name,
+                snapshot.SnapshotVersion,
+                snapshot.NodeCount,
+                snapshot.RelationshipCount
+            }),
+            HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty, true, cancellationToken);
         return CreatedAtAction(nameof(Get), new { id = snapshot.Id }, snapshot);
     }
 
@@ -54,11 +68,13 @@ public class SnapshotsController : ControllerBase
 
     [HttpGet("compare")]
     public async Task<ActionResult<SnapshotDiffDto>> Compare(
-        [FromQuery] Guid a,
-        [FromQuery] Guid b,
+        [FromQuery] Guid? a,
+        [FromQuery] Guid? b,
         CancellationToken cancellationToken)
     {
-        return Ok(await _snapshotService.CompareSnapshotsAsync(a, b, cancellationToken));
+        // Nullable so a missing parameter is a 400 from the service, not a
+        // lookup of the empty id that ends in 404.
+        return Ok(await _snapshotService.CompareSnapshotsAsync(a ?? Guid.Empty, b ?? Guid.Empty, cancellationToken));
     }
 
     [HttpGet("{id:guid}/verify")]

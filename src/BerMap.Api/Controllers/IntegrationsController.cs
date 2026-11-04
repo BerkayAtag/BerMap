@@ -131,7 +131,12 @@ public class IntegrationsController : ControllerBase
     [HttpPost("jobs/{jobId:guid}/cancel")]
     public async Task<IActionResult> CancelJob(Guid jobId, CancellationToken cancellationToken)
     {
-        var cancelled = await _integrationService.CancelJobAsync(jobId, this.GetActor(), cancellationToken);
-        return cancelled ? Accepted() : Conflict(new { message = "Job is not queued or running." });
+        var outcome = await _integrationService.CancelJobAsync(jobId, this.GetActor(), cancellationToken);
+        return outcome switch
+        {
+            CancelJobOutcome.Cancelled => Accepted(),
+            CancelJobOutcome.NotFound => NotFound(),
+            _ => Conflict(new { message = "Job is not queued or running." })
+        };
     }
 }

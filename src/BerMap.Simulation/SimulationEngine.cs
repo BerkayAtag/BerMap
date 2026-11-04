@@ -19,9 +19,11 @@ namespace BerMap.Simulation;
 /// </summary>
 public class SimulationEngine : ISimulationEngine
 {
-    // Relationship types that connect a workload to the entity it depends on.
-    private static readonly HashSet<string> DependencyEdgeTypes = new(StringComparer.OrdinalIgnoreCase)
-    { "DependsOn", "RunsOn", "UsesDatabase", "ConnectedTo" };
+    internal const string InvalidSimulationCode = "invalid_simulation";
+
+    // Failover admission buffer: below this remaining share the cluster is
+    // treated as unable to absorb the outage.
+    private const double AdmissionBufferPercent = 10;
 
     // Edge types that must NOT be traversed for impact propagation.
     private static readonly HashSet<string> ExcludedEdgeTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -35,6 +37,23 @@ public class SimulationEngine : ISimulationEngine
         "ResourcePool", "Storage", "Datastore", "Network", "NetworkDevice", "Group"
     };
 
+    private static readonly string[] HostNodeTypes = { nameof(NodeType.Hypervisor), nameof(NodeType.PhysicalServer) };
+
+    // Which node types each scenario can meaningfully fail.
+    private static readonly Dictionary<string, string[]> ValidTargetTypes = new(StringComparer.Ordinal)
+    {
+        ["host_failure"] = HostNodeTypes,
+        ["datastore_failure"] = new[] { nameof(NodeType.Datastore), nameof(NodeType.Storage) },
+        ["network_partition"] = new[] { nameof(NodeType.Network), nameof(NodeType.NetworkDevice) },
+        ["workload_outage"] = new[]
+        {
+            nameof(NodeType.VirtualMachine), nameof(NodeType.Computer), nameof(NodeType.DomainController),
+            nameof(NodeType.Application), nameof(NodeType.Service), nameof(NodeType.Database), nameof(NodeType.Endpoint),
+        },
+    };
+
+    private const string SupportedScenarios = "host_failure, datastore_failure, network_partition, workload_outage";
+
     private readonly IGraphService _graphService;
 
     public SimulationEngine(IGraphService graphService)
@@ -45,25 +64,36 @@ public class SimulationEngine : ISimulationEngine
     public async Task<ImpactAnalysisResultDto> RunSimulationAsync(SimulationRunRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.ScenarioType))
-            throw new ArgumentException("Scenario type is required.");
+            throw new IntegrationValidationException(InvalidSimulationCode, "Scenario type is required.");
 
         if (!IsKnownScenario(request.ScenarioType))
-            throw new ArgumentException(
-                $"Unknown scenario type '{request.ScenarioType}'. Supported: host_failure, datastore_failure, network_partition.");
+            throw new IntegrationValidationException(InvalidSimulationCode,
+                $"Unknown scenario type '{request.ScenarioType}'. Supported: {SupportedScenarios}.");
 
-        var graph = await _graphService.GetTopologyGraphAsync(request.TargetNodeId, depth: 3, cancellationToken);
-        var targetNode = graph.Nodes.FirstOrDefault(n => n.Id == request.TargetNodeId)
+        if (request.TargetNodeId is not { } targetNodeId || targetNodeId == Guid.Empty)
+            throw new IntegrationValidationException(InvalidSimulationCode, "targetNodeId is required.");
+
+        var scenario = NormalizeScenario(request.ScenarioType);
+
+        var graph = await _graphService.GetTopologyGraphAsync(targetNodeId, depth: 3, cancellationToken);
+        var targetNode = graph.Nodes.FirstOrDefault(n => n.Id == targetNodeId)
             ?? throw new KeyNotFoundException(
-                $"Target node {request.TargetNodeId} was not found in the inventory topology graph. Run a discovery first.");
+                $"Target node {targetNodeId} was not found in the inventory topology graph. Run a discovery first.");
+
+        var validTypes = ValidTargetTypes[scenario];
+        if (!MatchesAny(targetNode.NodeType, validTypes))
+            throw new IntegrationValidationException(InvalidSimulationCode,
+                $"Scenario '{scenario}' cannot target {targetNode.Name} ({targetNode.NodeType}). " +
+                $"Valid target types: {string.Join(", ", validTypes)}.");
 
         var result = new ImpactAnalysisResultDto
         {
-            TargetNodeId = request.TargetNodeId,
+            TargetNodeId = targetNodeId,
             TargetNodeName = targetNode.Name,
-            ScenarioType = NormalizeScenario(request.ScenarioType),
+            ScenarioType = scenario,
         };
 
-        switch (NormalizeScenario(request.ScenarioType))
+        switch (scenario)
         {
             case "host_failure":
                 CalculateBlastRadius(targetNode, graph, result,
@@ -80,14 +110,27 @@ public class SimulationEngine : ISimulationEngine
                     directEdgeTypes: new[] { "ConnectedTo", "ConnectsThrough" }, directEntityLabel: "endpoint");
                 break;
 
-            default:
-                throw new ArgumentException(
-                    $"Unknown scenario type '{request.ScenarioType}'. Supported: host_failure, datastore_failure, network_partition.");
+            case "workload_outage":
+                // The workload itself fails: nothing is placed on it, so the
+                // confirmed hits are the entities that depend on it directly
+                // (no placement edges), probable/possible ones further out.
+                CalculateBlastRadius(targetNode, graph, result,
+                    directEdgeTypes: Array.Empty<string>(), directEntityLabel: "dependent");
+                break;
         }
 
-        result.ClusterHeadroom = CalculateClusterHeadroom(targetNode, graph, NormalizeScenario(request.ScenarioType));
-        result.RiskScore = CalculateRiskScore(result);
-        result.Recommendations = BuildRecommendations(targetNode, graph, result);
+        var nodesById = graph.Nodes.ToDictionary(n => n.Id);
+
+        // Storage and network outages have no single compute cluster: their
+        // consumers can span several clusters, so compute headroom does not apply.
+        var clusterNode = scenario is "host_failure" or "workload_outage"
+            ? FindOwningCluster(targetNode, graph) is { } clusterId ? nodesById.GetValueOrDefault(clusterId) : null
+            : null;
+
+        result.ClusterHeadroom = CalculateClusterHeadroom(targetNode, clusterNode, scenario);
+        result.RiskScore = CalculateRiskScore(result, scenario);
+        result.RecommendationItems = BuildRecommendations(targetNode, clusterNode, scenario, result);
+        result.Recommendations = result.RecommendationItems.Select(i => i.Text).ToList();
 
         return result;
     }
@@ -97,14 +140,12 @@ public class SimulationEngine : ISimulationEngine
         "host_failure" or "esxi_failure" => "host_failure",
         "datastore_failure" or "datastore_outage" or "storage_failure" => "datastore_failure",
         "network_partition" or "network_cut" => "network_partition",
+        "workload_outage" => "workload_outage",
         _ => scenarioType.Trim().ToLowerInvariant(),
     };
 
-    internal static bool IsKnownScenario(string scenarioType)
-    {
-        var normalized = NormalizeScenario(scenarioType);
-        return normalized is "host_failure" or "datastore_failure" or "network_partition";
-    }
+    internal static bool IsKnownScenario(string scenarioType) =>
+        ValidTargetTypes.ContainsKey(NormalizeScenario(scenarioType));
 
     /// <summary>
     /// Real blast-radius computation:
@@ -150,13 +191,19 @@ public class SimulationEngine : ISimulationEngine
             directHits.Add((other, $"{targetNode.Name} -> [DOWN] -> {nodesById.GetValueOrDefault(other)?.Name ?? other.ToString()}"));
         }
 
-        // A workload target (VM, server, database...) is itself the failed
-        // entity in every scenario: what breaks first is whatever depends on it.
-        if (directHits.Count == 0 && !targetIsInfrastructure)
-            directHits.AddRange(FindDependents(new HashSet<Guid> { targetNode.Id }, graph, nodesById));
+        // A failed workload (workload_outage passes no placement edges) breaks
+        // whatever depends on it directly. A bare-metal server that hosts no
+        // VMs (host_failure on a PhysicalServer) is treated the same way.
+        if (directEdgeTypes.Length == 0 || (directHits.Count == 0 && !targetIsInfrastructure))
+        {
+            foreach (var dependent in FindDependents(new HashSet<Guid> { targetNode.Id }, graph, nodesById))
+            {
+                if (dependent.DependentId != targetNode.Id && directHits.All(h => h.Id != dependent.DependentId))
+                    directHits.Add(dependent);
+            }
+        }
 
-        var directHitIds = directHits.Select(h => h.Id).ToList();
-        var directHitSet = new HashSet<Guid>(directHitIds);
+        var directHitSet = new HashSet<Guid>(directHits.Select(h => h.Id));
         foreach (var (hitId, path) in directHits)
         {
             var hitNode = nodesById.GetValueOrDefault(hitId);
@@ -171,9 +218,7 @@ public class SimulationEngine : ISimulationEngine
         }
 
         // ---- Step 2: dependents of confirmed hits (probable) ----------------------
-        var nodeTypeById = graph.Nodes.ToDictionary(n => n.Id, n => n.NodeType);
         var probableByEntity = new Dictionary<Guid, (string Path, string Name, string Type)>();
-        var probableSet = new HashSet<Guid>();
 
         foreach (var (dependentId, path) in FindDependents(directHitSet, graph, nodesById))
         {
@@ -181,7 +226,7 @@ public class SimulationEngine : ISimulationEngine
             if (!probableByEntity.ContainsKey(dependentId))
             {
                 var node = nodesById.GetValueOrDefault(dependentId);
-                probableByEntity[dependentId] = (path, node?.Name ?? dependentId.ToString(), node?.NodeType ?? nodeTypeById.GetValueOrDefault(dependentId, "Unknown"));
+                probableByEntity[dependentId] = (path, node?.Name ?? dependentId.ToString(), node?.NodeType ?? "Unknown");
             }
         }
         foreach (var (dependentId, value) in probableByEntity)
@@ -195,7 +240,7 @@ public class SimulationEngine : ISimulationEngine
                 DependencyPath = value.Path,
             });
         }
-        probableSet.UnionWith(probableByEntity.Keys);
+        var probableSet = new HashSet<Guid>(probableByEntity.Keys);
 
         // ---- Step 3: dependents of probable hits (possible) -----------------------
         foreach (var (dependentId, path) in FindDependents(probableSet, graph, nodesById))
@@ -234,7 +279,6 @@ public class SimulationEngine : ISimulationEngine
         Dictionary<Guid, InfrastructureNodeDto> nodesById)
     {
         var found = new List<(Guid DependentId, string Path)>();
-        var nameById = nodesById.ToDictionary(n => n.Key, n => n.Value.Name);
         var seen = new HashSet<Guid>();
 
         foreach (var rel in graph.Relationships)
@@ -277,8 +321,8 @@ public class SimulationEngine : ISimulationEngine
 
             // The path shows the edge as stored (source -> target), so
             // "app -[DependsOn]-> db" reads as the dependency it is.
-            var sourceName = nameById.GetValueOrDefault(rel.SourceNodeId, rel.SourceNodeId.ToString());
-            var targetName = nameById.GetValueOrDefault(rel.TargetNodeId, rel.TargetNodeId.ToString());
+            var sourceName = nodesById.GetValueOrDefault(rel.SourceNodeId)?.Name ?? rel.SourceNodeId.ToString();
+            var targetName = nodesById.GetValueOrDefault(rel.TargetNodeId)?.Name ?? rel.TargetNodeId.ToString();
             found.Add((dependentId, $"{sourceName} -> [{rel.RelationshipType}] -> {targetName}"));
         }
 
@@ -286,32 +330,58 @@ public class SimulationEngine : ISimulationEngine
     }
 
     /// <summary>
-    /// Cluster headroom is computed from real vCenter metrics stored on the
-    /// cluster/hypervisor nodes (CpuUsagePercent / MemoryUsagePercent).
-    /// When metrics are absent the capacity verdict is explicitly "unknown"
-    /// (HasCapacityForFailover = false, bottleneck = "Metrics not collected").
+    /// Cluster headroom from the real vCenter metrics stored on the owning
+    /// cluster and the failed host. host_failure reports N-1 headroom: the
+    /// failed host's capacity leaves the cluster while its load stays (its VMs
+    /// restart on the survivors). workload_outage reports the cluster's current
+    /// headroom. Missing metrics give an explicit Unknown verdict; storage and
+    /// network outages (or a target without a cluster) are NotApplicable.
     /// </summary>
     private static ClusterHeadroomDto CalculateClusterHeadroom(
         InfrastructureNodeDto targetNode,
-        GraphQueryResultDto graph,
+        InfrastructureNodeDto? clusterNode,
         string scenario)
     {
-        var nodesById = graph.Nodes.ToDictionary(n => n.Id);
-
-        // Locate the owning cluster by walking the placement edges
-        // (direction-agnostic BFS, max 2 hops): host -> MountedOn -> datastore,
-        // cluster -> Contains -> host, workload -> MemberOf -> cluster etc.
-        Guid? clusterId = FindOwningCluster(targetNode.Id, graph, nodesById);
-
-        var clusterNode = clusterId != null ? nodesById.GetValueOrDefault(clusterId.Value) : null;
-
-        double? cpuRemaining = null;
-        double? ramRemaining = null;
-
-        if (clusterNode != null)
+        switch (scenario)
         {
-            cpuRemaining = ReadRemainingPercent(clusterNode, "CpuUsagePercent");
-            ramRemaining = ReadRemainingPercent(clusterNode, "MemoryUsagePercent");
+            case "datastore_failure":
+                return NotApplicable("Storage I/O path loss - failover needs replication, not compute headroom");
+            case "network_partition":
+                return NotApplicable("Network path loss - failover needs redundant paths, not compute headroom");
+        }
+
+        if (clusterNode == null)
+        {
+            return NotApplicable(scenario == "host_failure"
+                ? "No owning cluster - a standalone host has no failover capacity for its workloads"
+                : "No hosting cluster found - compute headroom does not apply to this workload");
+        }
+
+        double? cpuRemaining;
+        double? ramRemaining;
+        var isPostFailure = scenario == "host_failure";
+
+        if (isPostFailure)
+        {
+            // Without per-host capacity, an even share of the cluster is the
+            // failed host's capacity when the host count is known.
+            var hostCount = ReadPositive(clusterNode, "HostCount");
+            var clusterCpu = ReadPositive(clusterNode, "CpuCapacityMhz");
+            var clusterRam = ReadPositive(clusterNode, "MemoryCapacityMb");
+
+            cpuRemaining = PostFailureRemainingPercent(
+                clusterCpu,
+                ReadClusterUsage(clusterNode, "CpuUsageMhz", "CpuUsagePercent", "CpuCapacityMhz"),
+                ReadHostCpuCapacity(targetNode) ?? clusterCpu / hostCount);
+            ramRemaining = PostFailureRemainingPercent(
+                clusterRam,
+                ReadClusterUsage(clusterNode, "MemoryUsageMb", "MemoryUsagePercent", "MemoryCapacityMb"),
+                ReadPositive(targetNode, "MemoryMb") ?? ReadPositive(targetNode, "MemoryCapacityMb") ?? clusterRam / hostCount);
+        }
+        else
+        {
+            cpuRemaining = CurrentRemainingPercent(clusterNode, "CpuUsagePercent", "CpuUsageMhz", "CpuCapacityMhz");
+            ramRemaining = CurrentRemainingPercent(clusterNode, "MemoryUsagePercent", "MemoryUsageMb", "MemoryCapacityMb");
         }
 
         if (cpuRemaining == null || ramRemaining == null)
@@ -321,76 +391,139 @@ public class SimulationEngine : ISimulationEngine
                 RemainingCpuPercent = 0,
                 RemainingRamPercent = 0,
                 HasCapacityForFailover = false,
-                BottleneckResource = scenario == "datastore_failure"
-                    ? "Metrics not collected - failover verdict unknown for storage; verify secondary datastore replication"
-                    : "Metrics not collected - collect vCenter metrics / collector data for a capacity verdict",
+                BottleneckCode = "Unknown",
+                BottleneckResource = "Metrics not collected - collect vCenter metrics / collector data for a capacity verdict",
+                ClusterName = clusterNode.Name,
+                IsPostFailure = false,
             };
         }
 
-        var hasCapacity = cpuRemaining.Value >= 10 && ramRemaining.Value >= 10;
-        var bottleneck = scenario == "datastore_failure"
-            ? "Storage I/O path loss - failover needs replication, not compute headroom"
-            : !hasCapacity
-                ? cpuRemaining.Value < ramRemaining.Value
-                    ? "CPU headroom below the 10% failover admission buffer"
-                    : "RAM headroom below the 10% failover admission buffer"
-                : "None (headroom above the 10% admission buffer)";
+        var cpu = Math.Round(cpuRemaining.Value, 1);
+        var ram = Math.Round(ramRemaining.Value, 1);
+        var hasCapacity = cpu >= AdmissionBufferPercent && ram >= AdmissionBufferPercent;
+        var bottleneckCode = hasCapacity ? "None" : cpu < ram ? "Cpu" : "Ram";
 
         return new ClusterHeadroomDto
         {
-            RemainingCpuPercent = Math.Round(cpuRemaining.Value, 1),
-            RemainingRamPercent = Math.Round(ramRemaining.Value, 1),
-            HasCapacityForFailover = hasCapacity && scenario != "datastore_failure",
-            BottleneckResource = bottleneck,
+            RemainingCpuPercent = cpu,
+            RemainingRamPercent = ram,
+            HasCapacityForFailover = hasCapacity,
+            BottleneckCode = bottleneckCode,
+            BottleneckResource = bottleneckCode switch
+            {
+                "Cpu" => "CPU headroom below the 10% failover admission buffer",
+                "Ram" => "RAM headroom below the 10% failover admission buffer",
+                _ => "None (headroom above the 10% admission buffer)",
+            },
+            ClusterName = clusterNode.Name,
+            IsPostFailure = isPostFailure,
+        };
+
+        static ClusterHeadroomDto NotApplicable(string reason) => new()
+        {
+            RemainingCpuPercent = 0,
+            RemainingRamPercent = 0,
+            HasCapacityForFailover = false,
+            BottleneckCode = "NotApplicable",
+            BottleneckResource = reason,
+            ClusterName = string.Empty,
+            IsPostFailure = false,
         };
     }
 
+    /// <summary>remaining = 100 - used / (cluster capacity - failed host capacity) x 100, clamped.</summary>
+    private static double? PostFailureRemainingPercent(double? clusterCapacity, double? clusterUsage, double? hostCapacity)
+    {
+        if (clusterCapacity == null || clusterUsage == null || hostCapacity == null) return null;
+
+        var surviving = clusterCapacity.Value - hostCapacity.Value;
+        if (surviving <= 0) return 0; // the failed host was the cluster's only capacity
+
+        return Math.Clamp(100.0 - (clusterUsage.Value / surviving * 100.0), 0, 100);
+    }
+
+    private static double? CurrentRemainingPercent(InfrastructureNodeDto node, string percentKey, string usageKey, string capacityKey)
+    {
+        var usagePercent = ReadPositive(node, percentKey);
+        if (usagePercent == null &&
+            ReadPositive(node, usageKey) is { } usage &&
+            ReadPositive(node, capacityKey) is { } capacity)
+        {
+            usagePercent = usage / capacity * 100.0;
+        }
+
+        return usagePercent == null ? null : Math.Clamp(100.0 - usagePercent.Value, 0, 100);
+    }
+
+    /// <summary>Absolute cluster usage, or usage percent x capacity when only the percentage is stored.</summary>
+    private static double? ReadClusterUsage(InfrastructureNodeDto cluster, string usageKey, string percentKey, string capacityKey)
+    {
+        if (ReadPositive(cluster, usageKey) is { } usage) return usage;
+
+        return ReadPositive(cluster, percentKey) is { } percent && ReadPositive(cluster, capacityKey) is { } capacity
+            ? percent / 100.0 * capacity
+            : null;
+    }
+
+    private static double? ReadHostCpuCapacity(InfrastructureNodeDto host) =>
+        ReadPositive(host, "CpuCores") is { } cores && ReadPositive(host, "CpuMhz") is { } mhz
+            ? cores * mhz
+            : ReadPositive(host, "CpuCapacityMhz");
+
     /// <summary>
     /// Deterministic risk score: 20 base + 7 per confirmed + 3 per probable +
-    /// 1 per possible, +10 when the failover verdict is unfavourable or
-    /// unknown, capped at 100.
+    /// 1 per possible, +10 when a failover verdict applies to the scenario and
+    /// is unfavourable or unknown, capped at 100.
     /// </summary>
-    private static int CalculateRiskScore(ImpactAnalysisResultDto result)
+    private static int CalculateRiskScore(ImpactAnalysisResultDto result, string scenario)
     {
+        var headroom = result.ClusterHeadroom;
+        var verdictApplies = headroom.BottleneckCode != "NotApplicable" || scenario == "host_failure";
+
         var score = 20
                     + (7 * result.ConfirmedImpacts.Count)
                     + (3 * result.ProbableImpacts.Count)
                     + result.PossibleImpacts.Count
-                    + (result.ClusterHeadroom.HasCapacityForFailover ? 0 : 10);
+                    + (verdictApplies && !headroom.HasCapacityForFailover ? 10 : 0);
 
         return Math.Min(100, score);
     }
 
-    private static List<string> BuildRecommendations(
+    private static List<RecommendationItemDto> BuildRecommendations(
         InfrastructureNodeDto targetNode,
-        GraphQueryResultDto graph,
+        InfrastructureNodeDto? clusterNode,
+        string scenario,
         ImpactAnalysisResultDto result)
     {
-        var recommendations = new List<string>();
-        var nodesById = graph.Nodes.ToDictionary(n => n.Id);
+        var items = new List<RecommendationItemDto>();
 
         if (result.ConfirmedImpacts.Count == 0)
         {
-            recommendations.Add(
-                $"No directly connected workloads found for {targetNode.Name}; no down-stream blast radius detected in the current graph.");
-            return recommendations;
+            items.Add(Item("no_direct_impact",
+                $"No directly connected workloads found for {targetNode.Name}; no down-stream blast radius detected in the current graph.",
+                ("target", targetNode.Name)));
+            return items;
         }
 
         var headroom = result.ClusterHeadroom;
 
-        if (headroom != null && !headroom.HasCapacityForFailover)
+        if (headroom.BottleneckCode == "Unknown")
         {
-            recommendations.Add(
-                headroom.BottleneckResource.StartsWith("Metrics not collected", StringComparison.OrdinalIgnoreCase)
-                    ? "Capacity metrics are missing for the hosting cluster - run a vCenter discovery with metrics collection enabled before scheduling the change."
-                    : "Failover capacity is not confirmed. Verify redundancy or reschedule outside banking core hours (09:00-17:00).");
+            items.Add(Item("metrics_missing",
+                "Capacity metrics are missing for the hosting cluster - run a vCenter discovery with metrics collection enabled before scheduling the change."));
         }
-
-        if (headroom != null && headroom.HasCapacityForFailover)
+        else if (!headroom.HasCapacityForFailover)
         {
-            recommendations.Add(
-                string.Create(CultureInfo.InvariantCulture,
-                    $"Cluster headroom is sufficient for the modelled outage: CPU {headroom.RemainingCpuPercent:F1}%, RAM {headroom.RemainingRamPercent:F1}% remaining."));
+            items.Add(Item("failover_not_confirmed",
+                "Failover capacity is not confirmed. Verify redundancy before scheduling the change."));
+        }
+        else
+        {
+            var cpu = headroom.RemainingCpuPercent.ToString("F1", CultureInfo.InvariantCulture);
+            var ram = headroom.RemainingRamPercent.ToString("F1", CultureInfo.InvariantCulture);
+            items.Add(Item("headroom_sufficient",
+                $"Cluster headroom is sufficient for the modelled outage: CPU {cpu}%, RAM {ram}% remaining{(headroom.IsPostFailure ? " after the failed host's capacity is removed" : string.Empty)}.",
+                ("cpu", cpu), ("ram", ram), ("cluster", headroom.ClusterName)));
         }
 
         // Reconciled nodes keep their most specific type (a VM that is also an
@@ -400,87 +533,113 @@ public class SimulationEngine : ISimulationEngine
         var directCount = result.ConfirmedImpacts.Count(i => !InfrastructureNodeTypes.Contains(i.Type));
         if (directCount > 0)
         {
-            recommendations.Add(
-                $"{directCount} workload(s) directly attached to {targetNode.Name} will be unavailable while the fault persists.");
+            var count = directCount.ToString(CultureInfo.InvariantCulture);
+            items.Add(Item("workloads_unavailable",
+                $"{count} workload(s) directly attached to {targetNode.Name} will be unavailable while the fault persists.",
+                ("count", count), ("target", targetNode.Name)));
         }
 
-        var haEnabled = false;
-        foreach (var rel in graph.Relationships)
+        if (scenario == "host_failure")
         {
-            if (!MatchesAny(rel.RelationshipType, new[] { "Contains", "MemberOf" })) continue;
-            var cluster = rel.TargetNodeId == targetNode.Id ? nodesById.GetValueOrDefault(rel.SourceNodeId) : nodesById.GetValueOrDefault(rel.TargetNodeId);
-            if (cluster == null || !cluster.NodeType.Equals("Cluster", StringComparison.OrdinalIgnoreCase)) continue;
-            if (cluster.Properties.TryGetValue("HaEnabled", out var ha) && bool.TryParse(ha, out haEnabled) && haEnabled)
+            // Only the cluster that owns the failed host decides whether its VMs restart.
+            if (clusterNode != null &&
+                clusterNode.Properties.TryGetValue("HaEnabled", out var ha) &&
+                bool.TryParse(ha, out var haEnabled) && !haEnabled)
             {
-                break;
+                items.Add(Item("ha_disabled",
+                    $"VMware HA is not enabled on {clusterNode.Name} - there will be no automatic VM restart.",
+                    ("cluster", clusterNode.Name)));
             }
-        }
 
-        if (!haEnabled && targetNode.NodeType.Equals("Hypervisor", StringComparison.OrdinalIgnoreCase))
-        {
-            recommendations.Add(
-                "VMware HA is not enabled on the hosting cluster - there will be no automatic VM restart.");
+            var singleHostCluster = clusterNode != null &&
+                                    ReadDouble(clusterNode, "HostCount") is { } hostCount && hostCount <= 1;
+            if (directCount > 0 && (clusterNode == null || singleHostCluster))
+            {
+                items.Add(Item("single_point_of_failure",
+                    $"{targetNode.Name} is a single point of failure: no other cluster host can take over its workloads.",
+                    ("target", targetNode.Name)));
+            }
         }
 
         var probableCount = result.ProbableImpacts.Count;
         if (probableCount > 0)
         {
-            var dependentNames = string.Join(", ", result.ProbableImpacts.Take(3).Select(i => i.Name));
-            recommendations.Add(
-                $"{probableCount} dependent service(s) may degrade: {dependentNames}{(probableCount > 3 ? "..." : string.Empty)}. Confirm their failure mode before the maintenance window.");
+            var names = string.Join(", ", result.ProbableImpacts.Take(3).Select(i => i.Name)) +
+                        (probableCount > 3 ? ", …" : string.Empty);
+            var count = probableCount.ToString(CultureInfo.InvariantCulture);
+            items.Add(Item("dependents_degrade",
+                $"{count} dependent service(s) may degrade ({names}); confirm their failure mode before the maintenance window.",
+                ("count", count), ("names", names)));
         }
 
-        return recommendations;
-    }
+        return items;
 
-    private static Guid? FindOwningCluster(
-        Guid targetNodeId,
-        GraphQueryResultDto graph,
-        Dictionary<Guid, InfrastructureNodeDto> nodesById)
-    {
-        var visited = new HashSet<Guid> { targetNodeId };
-        var frontier = new List<Guid> { targetNodeId };
-
-        for (var hop = 0; hop < 2 && frontier.Count > 0; hop++)
+        static RecommendationItemDto Item(string code, string text, params (string Key, string Value)[] values) => new()
         {
-            var next = new List<Guid>();
+            Code = code,
+            Text = text,
+            Values = values.ToDictionary(v => v.Key, v => v.Value),
+        };
+    }
 
-            foreach (var rel in graph.Relationships)
-            {
-                if (!MatchesAny(rel.RelationshipType, new[] { "Contains", "MemberOf", "HostedOn", "MountedOn" })) continue;
+    /// <summary>
+    /// Resolves the compute cluster that owns the target: a cluster is its own
+    /// owner, a host belongs to its cluster (MemberOf / cluster Contains host),
+    /// a workload follows its HostedOn host to that host's cluster (falling back
+    /// to a direct cluster membership). Datacenter/Site containment is never
+    /// walked: it leads to sibling clusters. Returns null when none is found.
+    /// </summary>
+    internal static Guid? FindOwningCluster(InfrastructureNodeDto targetNode, GraphQueryResultDto graph)
+    {
+        var nodesById = graph.Nodes.ToDictionary(n => n.Id);
 
-                Guid other;
-                if (frontier.Contains(rel.SourceNodeId)) other = rel.TargetNodeId;
-                else if (frontier.Contains(rel.TargetNodeId)) other = rel.SourceNodeId;
-                else continue;
+        if (IsType(targetNode, nameof(NodeType.Cluster))) return targetNode.Id;
 
-                if (!visited.Add(other)) continue;
+        if (MatchesAny(targetNode.NodeType, HostNodeTypes)) return DirectCluster(targetNode.Id);
 
-                var otherNode = nodesById.GetValueOrDefault(other);
-                if (otherNode != null &&
-                    otherNode.NodeType.Equals("Cluster", StringComparison.OrdinalIgnoreCase))
-                {
-                    return other;
-                }
+        // Storage, network and organizational nodes have no single compute cluster.
+        if (InfrastructureNodeTypes.Contains(targetNode.NodeType)) return null;
 
-                next.Add(other);
-            }
+        var hosts = graph.Relationships
+            .Where(r => r.SourceNodeId == targetNode.Id && MatchesAny(r.RelationshipType, new[] { "HostedOn" }))
+            .Select(r => nodesById.GetValueOrDefault(r.TargetNodeId))
+            .Where(n => n != null && MatchesAny(n.NodeType, HostNodeTypes))
+            .OrderBy(n => n!.Name, StringComparer.Ordinal);
 
-            frontier = next;
+        foreach (var host in hosts)
+        {
+            if (DirectCluster(host!.Id) is { } hostCluster) return hostCluster;
         }
 
-        return null;
+        return DirectCluster(targetNode.Id);
+
+        Guid? DirectCluster(Guid memberId) => graph.Relationships
+            .Select(r =>
+                r.SourceNodeId == memberId && MatchesAny(r.RelationshipType, new[] { "MemberOf" }) ? r.TargetNodeId :
+                r.TargetNodeId == memberId && MatchesAny(r.RelationshipType, new[] { "Contains" }) ? r.SourceNodeId :
+                (Guid?)null)
+            .Where(id => id != null)
+            .Select(id => nodesById.GetValueOrDefault(id!.Value))
+            .Where(n => n != null && IsType(n, nameof(NodeType.Cluster)))
+            .OrderBy(n => n!.Name, StringComparer.Ordinal)
+            .Select(n => (Guid?)n!.Id)
+            .FirstOrDefault();
     }
 
-    private static double? ReadRemainingPercent(InfrastructureNodeDto node, string usageKey)
-    {
-        if (!node.Properties.TryGetValue(usageKey, out var raw) ||
-            !double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var usagePercent))
-            return null;
+    private static double? ReadDouble(InfrastructureNodeDto node, string key) =>
+        node.Properties.TryGetValue(key, out var raw) &&
+        double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
+        double.IsFinite(value)
+            ? value
+            : null;
 
-        var remaining = 100.0 - usagePercent;
-        return Math.Clamp(remaining, 0, 100);
-    }
+    // Adapters write "0.0" when a capacity or quickStats usage could not be
+    // read (a running cluster never uses exactly 0), so zero counts as missing.
+    private static double? ReadPositive(InfrastructureNodeDto node, string key) =>
+        ReadDouble(node, key) is { } value && value > 0 ? value : null;
+
+    private static bool IsType(InfrastructureNodeDto node, string nodeType) =>
+        string.Equals(node.NodeType, nodeType, StringComparison.OrdinalIgnoreCase);
 
     private static bool MatchesAny(string value, string[] candidates) =>
         candidates.Any(c => string.Equals(value, c, StringComparison.OrdinalIgnoreCase));

@@ -7,7 +7,6 @@
     <Project Path="src/BerMap.Domain/BerMap.Domain.csproj" />
     <Project Path="src/BerMap.Infrastructure/BerMap.Infrastructure.csproj" />
     <Project Path="src/BerMap.Simulation/BerMap.Simulation.csproj" />
-    <Project Path="src/BerMap.Worker/BerMap.Worker.csproj" />
   </Folder>
   <Folder Name="/src/BerMap.Integrations/">
     <Project Path="src/BerMap.Integrations/BerMap.Integrations.ActiveDirectory/BerMap.Integrations.ActiveDirectory.csproj" />

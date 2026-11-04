@@ -2,21 +2,25 @@ export type TranslationKey =
   | 'dashboard'
   | 'infrastructureMap'
   | 'inventory'
-  | 'impactAnalysis'
-  | 'berSim'
-  | 'berSimBadge'
+  | 'simulation'
   | 'berSimEngine'
   | 'snapshots'
   | 'capacityIntelligence'
-  | 'eventsAlerts'
   | 'reports'
   | 'integrations'
   | 'collectors'
   | 'auditLogs'
+  | 'users'
   | 'enterprise'
   | 'mainNavigation'
   | 'collapseSidebar'
   | 'expandSidebar'
+  | 'openNavigation'
+  | 'closeNavigation'
+  | 'openSearch'
+  | 'closeSearch'
+  | 'userMenu'
+  | 'changePassword'
   | 'systemHealthNormal'
   | 'systemHealthWarning'
   | 'systemHealthCritical'
@@ -58,21 +62,25 @@ const dictionaries: Record<'tr' | 'en', Record<TranslationKey, string>> = {
     dashboard: 'Dashboard',
     infrastructureMap: 'Altyapı Haritası',
     inventory: 'Envanter',
-    impactAnalysis: 'Etki Analizi',
-    berSim: 'BerSim',
-    berSimBadge: 'Sim',
+    simulation: 'Simülasyon',
     berSimEngine: 'BerSim Motoru',
     snapshots: 'Snapshot',
     capacityIntelligence: 'Kapasite İstihbaratı',
-    eventsAlerts: 'Olaylar & Uyarılar',
     reports: 'Raporlar',
     integrations: 'Entegrasyonlar',
     collectors: 'Collectorlar',
     auditLogs: 'Denetim Günlükleri',
+    users: 'Kullanıcılar',
     enterprise: 'KURUMSAL',
     mainNavigation: 'Ana gezinme',
     collapseSidebar: 'Daralt',
     expandSidebar: 'Genişlet',
+    openNavigation: 'Menüyü aç',
+    closeNavigation: 'Menüyü kapat',
+    openSearch: 'Aramayı aç',
+    closeSearch: 'Aramayı kapat',
+    userMenu: 'Kullanıcı menüsü',
+    changePassword: 'Parolayı değiştir',
     systemHealthNormal: 'Sistem Sağlığı: Normal',
     systemHealthWarning: 'Sistem Sağlığı: Uyarı',
     systemHealthCritical: 'Sistem Sağlığı: Kritik',
@@ -113,21 +121,25 @@ const dictionaries: Record<'tr' | 'en', Record<TranslationKey, string>> = {
     dashboard: 'Dashboard',
     infrastructureMap: 'Infrastructure Map',
     inventory: 'Inventory',
-    impactAnalysis: 'Impact Analysis',
-    berSim: 'BerSim',
-    berSimBadge: 'Sim',
+    simulation: 'Simulation',
     berSimEngine: 'BerSim Engine',
     snapshots: 'Snapshots',
     capacityIntelligence: 'Capacity Intelligence',
-    eventsAlerts: 'Events & Alerts',
     reports: 'Reports',
     integrations: 'Integrations',
     collectors: 'Collectors',
     auditLogs: 'Audit Logs',
+    users: 'Users',
     enterprise: 'ENTERPRISE',
     mainNavigation: 'Main navigation',
     collapseSidebar: 'Collapse',
     expandSidebar: 'Expand',
+    openNavigation: 'Open menu',
+    closeNavigation: 'Close menu',
+    openSearch: 'Open search',
+    closeSearch: 'Close search',
+    userMenu: 'User menu',
+    changePassword: 'Change password',
     systemHealthNormal: 'System Health: Normal',
     systemHealthWarning: 'System Health: Warning',
     systemHealthCritical: 'System Health: Critical',
@@ -163,6 +175,46 @@ const dictionaries: Record<'tr' | 'en', Record<TranslationKey, string>> = {
     multiSourceReconciled: 'Multi-Source Reconciled',
     close: 'Close',
     noPermission: 'You do not have permission for this action.',
+  },
+};
+
+/*
+ * Simulation recommendation templates, keyed by the engine's recommendation code
+ * (ImpactAnalysisResult.recommendationItems[].code). {name} placeholders are
+ * filled from the item's values; an unknown code falls back to the engine text.
+ * headroom_sufficient_post_failure is used when clusterHeadroom.isPostFailure.
+ */
+export const recommendationTemplates: Record<'tr' | 'en', Record<string, string>> = {
+  tr: {
+    no_direct_impact:
+      '{target} için doğrudan bağlı iş yükü bulunamadı; mevcut grafikte aşağı yönlü etki yarıçapı tespit edilmedi.',
+    metrics_missing:
+      'Barındıran cluster için kapasite metrikleri eksik; değişikliği planlamadan önce metrik toplama açık bir vCenter keşfi çalıştırın.',
+    failover_not_confirmed: 'Failover kapasitesi doğrulanamadı. Değişikliği planlamadan önce yedekliliği kontrol edin.',
+    headroom_sufficient: 'Cluster kapasitesi modellenen kesinti için yeterli: CPU {cpu}%, RAM {ram}% kalıyor.',
+    headroom_sufficient_post_failure:
+      'Cluster kapasitesi modellenen kesinti için yeterli: arızalı hostun kapasitesi düşüldükten sonra (N-1) CPU {cpu}%, RAM {ram}% kalıyor.',
+    workloads_unavailable: '{target} bileşenine doğrudan bağlı {count} iş yükü arıza sürdükçe erişilemez olacak.',
+    dependents_degrade:
+      '{count} bağımlı servis etkilenebilir ({names}); bakım penceresinden önce bu servislerin arıza davranışını doğrulayın.',
+    ha_disabled: '{cluster} üzerinde VMware HA etkin değil; VM’ler otomatik olarak yeniden başlatılmayacak.',
+    single_point_of_failure:
+      '{target} tek hata noktası: iş yüklerini devralabilecek başka bir cluster hostu yok.',
+  },
+  en: {
+    no_direct_impact:
+      'No directly connected workloads found for {target}; no downstream blast radius detected in the current graph.',
+    metrics_missing:
+      'Capacity metrics are missing for the hosting cluster. Run a vCenter discovery with metrics collection enabled before scheduling the change.',
+    failover_not_confirmed: 'Failover capacity is not confirmed. Verify redundancy before scheduling the change.',
+    headroom_sufficient: 'Cluster headroom is sufficient for the modelled outage: CPU {cpu}%, RAM {ram}% remaining.',
+    headroom_sufficient_post_failure:
+      "Cluster headroom is sufficient for the modelled outage: CPU {cpu}%, RAM {ram}% remaining after the failed host's capacity is removed (N-1).",
+    workloads_unavailable: '{count} workload(s) directly attached to {target} will be unavailable while the fault persists.',
+    dependents_degrade:
+      '{count} dependent service(s) may degrade ({names}); confirm their failure mode before the maintenance window.',
+    ha_disabled: 'VMware HA is not enabled on {cluster}; there will be no automatic VM restart.',
+    single_point_of_failure: '{target} is a single point of failure: no other cluster host can take over its workloads.',
   },
 };
 

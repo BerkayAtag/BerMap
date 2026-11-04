@@ -78,7 +78,7 @@ export const LoginPage: React.FC = () => {
 
   return (
     <div className="min-h-screen w-full flex items-center justify-center p-4 bg-neutral-100 dark:bg-dark-bg transition-colors">
-      <Card className="w-full max-w-md p-8 border-neutral-200 dark:border-dark-border shadow-xl">
+      <Card className="w-full max-w-md p-6 sm:p-8 border-neutral-200 dark:border-dark-border shadow-xl">
         <div className="flex flex-col items-center text-center mb-8">
           {/* Brand logo badge */}
           <div className="w-14 h-14 rounded-2xl bg-brand-primary text-white font-black text-3xl shadow-lg flex items-center justify-center mb-4">
@@ -88,14 +88,14 @@ export const LoginPage: React.FC = () => {
             Ber<span className="text-brand-primary dark:text-brand-primary-dark">Map</span> Web Console
           </h1>
           <p lang="en" className="text-xs uppercase tracking-widest font-semibold text-neutral-500 mt-1">
-            Enterprise Infrastructure Intelligence · BerSim Ready
+            Enterprise Infrastructure Intelligence
           </p>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label htmlFor={usernameId} className="block text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400 mb-1.5">
-              {isTr ? 'Kullanıcı Adı veya Kurumsal Kimlik' : 'Username or Corporate Identity'}
+              {isTr ? 'Kullanıcı Adı' : 'Username'}
             </label>
             <div className="relative">
               <UserIcon className="w-4 h-4 absolute left-3 top-3 text-neutral-400" aria-hidden="true" />
@@ -141,13 +141,13 @@ export const LoginPage: React.FC = () => {
           <Button type="submit" variant="primary" className="w-full mt-2 bg-brand-primary" disabled={submitting}>
             {submitting
               ? (isTr ? 'Giriş yapılıyor...' : 'Signing in...')
-              : (isTr ? 'Güvenli Giriş Yap' : 'Secure Sign In')}
+              : (isTr ? 'Giriş Yap' : 'Sign In')}
           </Button>
         </form>
 
         <div className="mt-8 pt-6 border-t border-neutral-200 dark:border-dark-border text-center text-xs text-neutral-400 dark:text-neutral-500 flex items-center justify-center gap-1.5">
           <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          {isTr ? 'Air-Gapped & Kurum İçi Güvenli Oturum' : 'Air-Gapped & On-Premises Secure Session'}
+          {isTr ? 'Yerel BerMap hesabı · Air-gapped kurulum' : 'Local BerMap account · Air-gapped deployment'}
         </div>
       </Card>
     </div>

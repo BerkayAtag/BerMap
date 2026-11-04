@@ -17,11 +17,24 @@ import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { Button } from '@/components/ui/Button';
 import { ButtonLink } from '@/components/ui/ButtonLink';
 import { useThemeTokens, type ThemeTokens } from '@/hooks/useThemeTokens';
+import { useEscapeKey } from '@/hooks/useEscapeKey';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber, getErrorMessage, toNodeStatus } from '@/lib/format';
 import type { GraphQueryResult, InfrastructureNode } from '@/types';
-import { Server, Database, Cpu, Layers, Search, Network, RefreshCw, PlugZap, AlertTriangle } from 'lucide-react';
+import {
+  Server,
+  Database,
+  Cpu,
+  Search,
+  Network,
+  RefreshCw,
+  PlugZap,
+  AlertTriangle,
+  ExternalLink,
+  Play,
+  X,
+} from 'lucide-react';
 
 const TYPE_GROUP_ORDER: Record<string, number> = {
   Datacenter: 0,
@@ -119,12 +132,14 @@ function buildFlowGraph(
         background: tokens.surface,
         color: tokens.text,
         borderRadius: '8px',
-        border: `1px solid ${borderColor}`,
+        // Stale nodes (no longer seen by any source) are dashed and faded.
+        border: `1px ${node.isStale ? 'dashed' : 'solid'} ${node.isStale ? tokens.textMuted : borderColor}`,
         padding: '8px 10px',
         fontWeight: node.nodeType === 'Datacenter' ? 'bold' : 'normal',
+        fontStyle: node.isStale ? 'italic' : 'normal',
         width: 200,
         fontSize: 11,
-        opacity: isVisible(node) ? 1 : 0.12,
+        opacity: isVisible(node) ? (node.isStale ? 0.55 : 1) : 0.12,
       },
     } satisfies Node;
   });
@@ -148,7 +163,8 @@ function buildFlowGraph(
         style: {
           strokeWidth: isSelected ? 2 : 1,
           stroke: isSelected ? tokens.brand : tokens.textMuted,
-          opacity: dimmed ? 0.15 : 0.55,
+          strokeDasharray: rel.isStale ? '4 4' : undefined,
+          opacity: dimmed ? 0.15 : rel.isStale ? 0.3 : 0.55,
         },
         labelStyle: { fontSize: 10, fill: tokens.text },
         labelBgStyle: { fill: tokens.surface },
@@ -226,10 +242,18 @@ export const InfrastructureMapPage: React.FC = () => {
   }, [topologyQuery.data, selectedNodeId]);
 
   const error = topologyQuery.isError ? getErrorMessage(topologyQuery.error) : null;
+  const totalNodes = topologyQuery.data?.nodes.length ?? 0;
+  const matchedCount = useMemo(
+    () => (searchText ? (topologyQuery.data?.nodes.filter(matchNode).length ?? 0) : totalNodes),
+    [searchText, topologyQuery.data, matchNode, totalNodes],
+  );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNodeId(node.id);
   }, []);
+  const closeDetail = useCallback(() => setSelectedNodeId(null), []);
+
+  useEscapeKey(selectedNodeId !== null, closeDetail);
 
   return (
     <div className="h-full min-h-[480px] flex flex-col gap-4">
@@ -261,25 +285,21 @@ export const InfrastructureMapPage: React.FC = () => {
 
       {/* Map Control Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-dark-card p-3 rounded-lg border border-neutral-200 dark:border-dark-border">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-100 dark:bg-dark-border text-sm">
-            <Search className="w-4 h-4 text-neutral-400" />
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-100 dark:bg-dark-border text-sm min-w-0">
+            <Search className="w-4 h-4 text-neutral-400 shrink-0" />
             <input
-              type="text"
+              type="search"
               value={queryInput}
               onChange={(event) => setQueryInput(event.target.value)}
               placeholder={isTr ? 'Haritada filtrele...' : 'Filter on map...'}
-              className="bg-transparent text-sm focus:outline-none w-48 text-neutral-800 dark:text-neutral-200"
+              aria-label={isTr ? 'Haritada filtrele' : 'Filter on map'}
+              className="bg-transparent text-sm focus:outline-none w-full sm:w-48 min-w-0 text-neutral-800 dark:text-neutral-200"
             />
           </div>
-
-          <Button variant="outline" size="sm" className="gap-1.5" disabled>
-            <Layers className="w-3.5 h-3.5" />
-            {isTr ? 'Görünüm: Tümü' : 'View: All'}
-          </Button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -290,10 +310,16 @@ export const InfrastructureMapPage: React.FC = () => {
             <RefreshCw className={`w-3.5 h-3.5 ${topologyQuery.isFetching ? 'animate-spin' : ''}`} />
             {isTr ? 'Yenile' : 'Refresh'}
           </Button>
-          <span className="text-xs text-neutral-500 dark:text-neutral-400 mr-2">
+          <span className="text-xs text-neutral-500 dark:text-neutral-400 mr-2" aria-live="polite">
             {isTr ? 'Gösterilen:' : 'Showing:'}{' '}
-            <strong>{formatNumber(nodes.length)}</strong> {isTr ? 'düğüm,' : 'nodes,'}{' '}
-            <strong>{formatNumber(edges.length)}</strong> {isTr ? 'bağlantı' : 'links'}
+            {searchText ? (
+              <>
+                <strong>{formatNumber(matchedCount)}</strong> / {formatNumber(totalNodes)}
+              </>
+            ) : (
+              <strong>{formatNumber(totalNodes)}</strong>
+            )}{' '}
+            {isTr ? 'düğüm,' : 'nodes,'} <strong>{formatNumber(edges.length)}</strong> {isTr ? 'bağlantı' : 'links'}
           </span>
         </div>
       </div>
@@ -337,6 +363,7 @@ export const InfrastructureMapPage: React.FC = () => {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onNodeClick={onNodeClick}
+              onPaneClick={closeDetail}
               colorMode={isDark ? 'dark' : 'light'}
               fitView
             >
@@ -349,11 +376,32 @@ export const InfrastructureMapPage: React.FC = () => {
               />
             </ReactFlow>
           )}
+
+          {searchText && matchedCount === 0 && nodes.length > 0 && (
+            <div
+              role="status"
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-10 max-w-[90%] px-4 py-2 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/80 text-xs text-amber-800 dark:text-amber-300 shadow-sm flex items-center gap-2"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>
+                {isTr
+                  ? `"${queryInput.trim()}" ile eşleşen düğüm yok. Ad, FQDN, IP veya tür ile arayın.`
+                  : `No nodes match "${queryInput.trim()}". Search by name, FQDN, IP or type.`}
+              </span>
+              <button
+                type="button"
+                onClick={() => setQueryInput('')}
+                className="font-semibold hover:underline shrink-0"
+              >
+                {isTr ? 'Temizle' : 'Clear'}
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* Selected Node Details Side Panel (real data) */}
+        {/* Selected Node Details Side Panel (real data); an overlay on small screens */}
         {selectedNode && (
-          <Card className="w-80 p-5 flex flex-col justify-between border-neutral-200 dark:border-dark-border bm-slide-in-right overflow-y-auto">
+          <Card className="absolute inset-y-0 right-0 z-20 w-full max-w-80 lg:static lg:w-80 lg:max-w-none p-5 flex flex-col justify-between border-neutral-200 dark:border-dark-border bm-slide-in-right overflow-y-auto shadow-xl lg:shadow-none">
             <div className="min-w-0">
               <div className="flex items-center justify-between border-b border-neutral-200 dark:border-dark-border pb-3">
                 <div className="flex items-center gap-2">
@@ -362,7 +410,17 @@ export const InfrastructureMapPage: React.FC = () => {
                     {isTr ? 'Bileşen Detayı' : 'Component Detail'}
                   </span>
                 </div>
-                <StatusIndicator status={toNodeStatus(selectedNode.status)} size="sm" />
+                <div className="flex items-center gap-2">
+                  <StatusIndicator status={toNodeStatus(selectedNode.status)} size="sm" />
+                  <button
+                    type="button"
+                    onClick={closeDetail}
+                    aria-label={isTr ? 'Detayı kapat' : 'Close detail'}
+                    className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="mt-4 space-y-3">
@@ -373,6 +431,32 @@ export const InfrastructureMapPage: React.FC = () => {
                   <span className="text-xs text-neutral-500 font-mono break-all">
                     {selectedNode.fqdn || selectedNode.id}
                   </span>
+                  {selectedNode.isStale && (
+                    <span className="mt-1 inline-flex text-[10px] px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 font-semibold">
+                      {isTr ? 'Bayat — son keşifte görülmedi' : 'Stale — not seen in the latest discovery'}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <ButtonLink
+                    to={`/inventory?node=${encodeURIComponent(selectedNode.id)}`}
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {isTr ? 'Envanterde aç' : 'Open in inventory'}
+                  </ButtonLink>
+                  <ButtonLink
+                    to={`/simulation?target=${encodeURIComponent(selectedNode.id)}`}
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    {isTr ? 'Simülasyon' : 'Simulation'}
+                  </ButtonLink>
                 </div>
 
                 <div className="space-y-2 text-xs pt-2">
@@ -420,19 +504,29 @@ export const InfrastructureMapPage: React.FC = () => {
                     </p>
                   ) : (
                     <div className="space-y-1">
-                      {relevantRelations.slice(0, 12).map((rel) => (
-                        <div
-                          key={rel.id}
-                          className="text-[11px] text-neutral-600 dark:text-neutral-300 flex items-center gap-1"
-                        >
-                          <span className="font-mono text-[10px] text-neutral-400">{rel.relationshipType}</span>
-                          <span>
-                            {rel.sourceNodeId === selectedNode.id
-                              ? `${isTr ? '→' : '→'} ${rel.targetNodeName}`
-                              : `${isTr ? '←' : '←'} ${rel.sourceNodeName}`}
-                          </span>
-                        </div>
-                      ))}
+                      {relevantRelations.slice(0, 12).map((rel) => {
+                        const outgoing = rel.sourceNodeId === selectedNode.id;
+                        const otherId = outgoing ? rel.targetNodeId : rel.sourceNodeId;
+                        const otherName = outgoing ? rel.targetNodeName : rel.sourceNodeName;
+                        const onMap = nodeById.has(otherId);
+                        return (
+                          <button
+                            key={rel.id}
+                            type="button"
+                            disabled={!onMap}
+                            onClick={() => setSelectedNodeId(otherId)}
+                            title={onMap ? undefined : isTr ? 'Bu düğüm haritada gösterilmiyor' : 'This node is not shown on the map'}
+                            className={`w-full text-left text-[11px] text-neutral-600 dark:text-neutral-300 flex items-center gap-1 rounded px-1 py-0.5 enabled:hover:bg-neutral-100 dark:enabled:hover:bg-neutral-800 disabled:cursor-default ${
+                              rel.isStale ? 'opacity-60 line-through decoration-dotted' : ''
+                            }`}
+                          >
+                            <span lang="en" className="font-mono text-[10px] text-neutral-400 shrink-0">{rel.relationshipType}</span>
+                            <span className={`truncate ${onMap ? 'text-brand-primary dark:text-brand-primary-dark' : ''}`}>
+                              {outgoing ? '→' : '←'} {otherName}
+                            </span>
+                          </button>
+                        );
+                      })}
                       {relevantRelations.length > 12 && (
                         <p className="text-[10px] text-neutral-500">
                           +{relevantRelations.length - 12} {isTr ? 'ilişki daha' : 'more'}
@@ -449,7 +543,7 @@ export const InfrastructureMapPage: React.FC = () => {
                 variant="outline"
                 size="sm"
                 className="w-full"
-                onClick={() => setSelectedNodeId(null)}
+                onClick={closeDetail}
               >
                 {isTr ? 'Kapat' : 'Close'}
               </Button>

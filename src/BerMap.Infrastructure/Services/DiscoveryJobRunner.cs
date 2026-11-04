@@ -9,6 +9,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
+using BerMap.Application.Services.Integrations;
 using BerMap.Contracts;
 using BerMap.Domain.Entities;
 using BerMap.Domain.Enums;
@@ -192,21 +193,21 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             if (discovery.Success && errors.Count == 0)
             {
                 job.Status = DiscoveryJobStatus.Completed;
-                integration.Status = IntegrationStatus.Active;
+                integration.Status = IntegrationStatusRules.AfterRun(integration.IsEnabled, IntegrationStatus.Active);
                 integration.LastError = string.Empty;
                 integration.LastErrorAt = null;
             }
             else if (discovery.Nodes.Count > 0 || discovery.Relationships.Count > 0)
             {
                 job.Status = DiscoveryJobStatus.PartialSuccess;
-                integration.Status = IntegrationStatus.Degraded;
+                integration.Status = IntegrationStatusRules.AfterRun(integration.IsEnabled, IntegrationStatus.Degraded);
                 integration.LastError = errors.FirstOrDefault() ?? "Discovery returned partial data.";
                 integration.LastErrorAt = DateTime.UtcNow;
             }
             else
             {
                 job.Status = DiscoveryJobStatus.Failed;
-                integration.Status = IntegrationStatus.Error;
+                integration.Status = IntegrationStatusRules.AfterRun(integration.IsEnabled, IntegrationStatus.Error);
                 integration.LastError = errors.FirstOrDefault() ?? "Discovery returned no data.";
                 integration.LastErrorAt = DateTime.UtcNow;
             }
@@ -255,7 +256,8 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             job.DurationMs = (long)stopwatch.Elapsed.TotalMilliseconds;
             job.CurrentPhase = "Cancelled";
             job.CurrentMessage = "Discovery was cancelled.";
-            integration.Status = integration.IsEnabled ? IntegrationStatus.Active : IntegrationStatus.Inactive;
+            // A cancelled run proves nothing; the previous health stays.
+            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
             integration.UpdatedAt = DateTime.UtcNow;
             await context.SaveChangesAsync(CancellationToken.None);
 
@@ -375,7 +377,7 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             ? (long)(job.CompletedAt.Value - job.StartedAt).TotalMilliseconds
             : null;
 
-        integration.Status = IntegrationStatus.Error;
+        integration.Status = IntegrationStatusRules.AfterRun(integration.IsEnabled, IntegrationStatus.Error);
         integration.LastError = $"{errorCode}: {errorMessage}";
         integration.LastErrorAt = DateTime.UtcNow;
         integration.UpdatedAt = DateTime.UtcNow;

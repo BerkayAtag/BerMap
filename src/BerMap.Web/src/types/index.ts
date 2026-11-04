@@ -192,6 +192,8 @@ export interface Integration {
   lastError: string;
   lastErrorAt?: string | null;
   discoveredEntitiesCount: number;
+  /** Data arrives from a collector; the server never tests or discovers it itself. */
+  collectorManaged?: boolean;
   lastJobId?: string | null;
   createdAt: string;
   updatedAt?: string | null;
@@ -207,6 +209,7 @@ export interface CreateIntegrationRequest {
   scheduleCron: string;
   timeoutSeconds: number;
   isEnabled: boolean;
+  collectorManaged?: boolean;
 }
 
 export interface UpdateIntegrationRequest {
@@ -218,6 +221,7 @@ export interface UpdateIntegrationRequest {
   scheduleCron?: string;
   timeoutSeconds?: number;
   isEnabled?: boolean;
+  collectorManaged?: boolean;
 }
 
 export interface ConnectionTestResult {
@@ -263,11 +267,12 @@ export interface Collector {
   version: string;
   lastHeartbeatAt: string;
   supportedAdapters: string[];
+  /** Null values (or null metrics) mean the collector never reported them. */
   metrics: {
-    cpuUsagePercent: number;
-    memoryUsagePercent: number;
-    queuedMessages: number;
-  };
+    cpuUsagePercent: number | null;
+    memoryUsagePercent: number | null;
+    queuedMessages: number | null;
+  } | null;
 }
 
 /* ===== Dashboard ===== */
@@ -276,6 +281,7 @@ export interface RecentChange {
   id: string;
   entityName: string;
   entityType: string;
+  /** "Discovered" (node first seen) or "StatusChanged". */
   changeType: string;
   source: string;
   status: string;
@@ -454,8 +460,8 @@ export interface PaginatedResponse<T> {
 
 export interface SimulationRunRequest {
   targetNodeId: string;
+  /** host_failure | datastore_failure | network_partition | workload_outage */
   scenarioType: string;
-  snapshotId?: string | null;
 }
 
 export interface ImpactedEntity {
@@ -471,6 +477,17 @@ export interface ClusterHeadroom {
   remainingRamPercent: number;
   hasCapacityForFailover: boolean;
   bottleneckResource: string;
+  /** Machine-readable bottleneck: Cpu | Ram | None | Unknown | NotApplicable. */
+  bottleneckCode?: 'Cpu' | 'Ram' | 'None' | 'Unknown' | 'NotApplicable' | string;
+  clusterName?: string;
+  /** True when the failed host's capacity was subtracted (N-1 headroom). */
+  isPostFailure?: boolean;
+}
+
+export interface RecommendationItem {
+  code: string;
+  text: string;
+  values: Record<string, string>;
 }
 
 export interface ImpactAnalysisResult {
@@ -483,4 +500,56 @@ export interface ImpactAnalysisResult {
   possibleImpacts: ImpactedEntity[];
   clusterHeadroom: ClusterHeadroom;
   recommendations: string[];
+  /** Coded recommendations, localized in the UI; `text` is the English fallback. */
+  recommendationItems?: RecommendationItem[];
+}
+
+/* ===== Audit ===== */
+
+export interface AuditEntry {
+  id: string;
+  userId: string;
+  username: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  detailsJson: string;
+  ipAddress: string;
+  success: boolean;
+  createdAt: string;
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+}
+
+/* ===== User management ===== */
+
+export interface UserAccount {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  role: string;
+  isActive: boolean;
+  lastLogin?: string | null;
+  createdAt: string;
+}
+
+export interface CreateUserRequest {
+  username: string;
+  displayName?: string;
+  email?: string;
+  role: string;
+  password: string;
+}
+
+export interface UpdateUserRequest {
+  displayName?: string;
+  email?: string;
+  role?: string;
+  isActive?: boolean;
 }

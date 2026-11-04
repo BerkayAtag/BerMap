@@ -22,6 +22,13 @@ public class InfrastructureNode : Entity
     public Guid? LastSeenJobId { get; set; }
     public DateTime FirstSeen { get; set; } = DateTime.UtcNow;
     public DateTime LastSeen { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// When discovery last reported a different status than the stored one.
+    /// Null until the status changes for the first time after discovery.
+    /// </summary>
+    public DateTime? StatusChangedAt { get; set; }
+
     public long SnapshotVersion { get; set; } = 1;
 
     // Navigation properties for relationships
@@ -183,6 +190,13 @@ public class Integration : Entity
     public string ScheduleCron { get; set; } = "0 */6 * * *"; // every 6h default
     public int TimeoutSeconds { get; set; } = 1800;
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Data arrives from a remote collector. The server never tests or
+    /// discovers such an integration itself, and the scheduler skips it.
+    /// </summary>
+    public bool CollectorManaged { get; set; }
+
     public Guid? LastJobId { get; set; }
     public DateTime? DeletedAt { get; set; }
     public string CreatedBy { get; set; } = string.Empty;

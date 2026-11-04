@@ -54,15 +54,17 @@ public sealed class InventoryService : IInventoryService
                 n.DomainSid.ToLower().Contains(value));
         }
 
-        if (!string.IsNullOrWhiteSpace(request.NodeType) &&
-            Enum.TryParse<NodeType>(request.NodeType, true, out var nodeType))
+        // An unknown filter value is an error, not "no filter": silently
+        // ignoring it returned the whole inventory as if it had matched.
+        if (!string.IsNullOrWhiteSpace(request.NodeType))
         {
+            var nodeType = ParseNodeTypeFilter(request.NodeType);
             query = query.Where(n => n.NodeType == nodeType);
         }
 
         if (!string.IsNullOrWhiteSpace(request.Status))
         {
-            var status = request.Status.Trim().ToLowerInvariant();
+            var status = ParseStatusFilter(request.Status);
             query = query.Where(n => n.Status == status);
         }
 
@@ -80,7 +82,8 @@ public sealed class InventoryService : IInventoryService
 
         var totalCount = await query.CountAsync(cancellationToken);
         var nodes = await query
-            .OrderBy(n => n.Name)
+            .OrderBy(n => n.Name.ToLower())
+            .ThenBy(n => n.Name)
             .ThenBy(n => n.Id)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -248,6 +251,53 @@ public sealed class InventoryService : IInventoryService
             .ToList();
     }
 
+    /// <summary>Valid values of the inventory status filter (the normalised node statuses).</summary>
+    public static readonly IReadOnlyList<string> StatusFilterValues = new[] { "healthy", "warning", "critical", "unknown" };
+
+    internal static NodeType ParseNodeTypeFilter(string value)
+    {
+        var trimmed = value.Trim();
+        // Enum.TryParse also accepts numbers ("42"), which are not node types.
+        if (!trimmed.All(char.IsDigit) &&
+            Enum.TryParse<NodeType>(trimmed, ignoreCase: true, out var nodeType) &&
+            Enum.IsDefined(nodeType))
+        {
+            return nodeType;
+        }
+
+        throw new IntegrationValidationException(
+            "invalid_filter",
+            $"Unknown node type '{trimmed}'. Valid values: {string.Join(", ", Enum.GetNames<NodeType>())}.");
+    }
+
+    internal static string ParseStatusFilter(string value)
+    {
+        var status = value.Trim().ToLowerInvariant();
+        if (StatusFilterValues.Contains(status))
+            return status;
+
+        throw new IntegrationValidationException(
+            "invalid_filter",
+            $"Unknown status '{value.Trim()}'. Valid values: {string.Join(", ", StatusFilterValues)}.");
+    }
+
+    private async Task<int> RemovePossibleDuplicateEdgesAsync(ReconciliationReview review, CancellationToken cancellationToken)
+    {
+        if (!review.CreatedNodeId.HasValue || !review.CandidateNodeId.HasValue)
+            return 0;
+
+        var a = review.CreatedNodeId.Value;
+        var b = review.CandidateNodeId.Value;
+        var edges = await _context.InfrastructureRelationships
+            .Where(r => r.RelationshipType == RelationshipType.PossibleDuplicate &&
+                        ((r.SourceNodeId == a && r.TargetNodeId == b) ||
+                         (r.SourceNodeId == b && r.TargetNodeId == a)))
+            .ToListAsync(cancellationToken);
+
+        _context.InfrastructureRelationships.RemoveRange(edges);
+        return edges.Count;
+    }
+
     public async Task<ReconciliationReviewDto?> ResolveReviewAsync(
         Guid id,
         ResolveReconciliationReviewRequest request,
@@ -277,11 +327,15 @@ public sealed class InventoryService : IInventoryService
             review.ReviewedBy = actor;
             review.ResolutionNotes = request.Notes?.Trim() ?? string.Empty;
             review.UpdatedAt = DateTime.UtcNow;
+
+            // The nodes are confirmed distinct, so the inferred duplicate edge
+            // between them is wrong and must leave the inventory and the map.
+            var duplicateEdges = await RemovePossibleDuplicateEdgesAsync(review, cancellationToken);
             await _context.SaveChangesAsync(cancellationToken);
 
             await _auditService.LogAsync(
                 actor, actor, "ReconciliationReviewDismissed", nameof(ReconciliationReview), review.Id.ToString(),
-                JsonSerializer.Serialize(new { review.IntegrationId, review.MatchKey, review.Reason }),
+                JsonSerializer.Serialize(new { review.IntegrationId, review.MatchKey, review.Reason, duplicateEdgesRemoved = duplicateEdges }),
                 string.Empty, true, cancellationToken);
 
             var names = await GetReviewNodeNamesAsync(review, cancellationToken);
