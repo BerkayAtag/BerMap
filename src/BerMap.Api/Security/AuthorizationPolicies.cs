@@ -7,4 +7,7 @@ public static class AuthorizationPolicies
 
     /// <summary>Change platform state: snapshots, simulations, review decisions.</summary>
     public const string Operate = "Operate";
+
+    /// <summary>Create, change and deactivate console accounts.</summary>
+    public const string ManageUsers = "ManageUsers";
 }

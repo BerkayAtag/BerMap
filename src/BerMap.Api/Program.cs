@@ -23,6 +23,11 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Release packages run the API as a Windows service or a systemd unit; both
+// calls are no-ops when the process is started from a console.
+builder.Host.UseWindowsService(options => options.ServiceName = "BerMapServer");
+builder.Host.UseSystemd();
+
 builder.Services
     .AddControllers()
     .AddJsonOptions(options =>
@@ -83,6 +88,8 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(AuthorizationPolicies.ManageIntegrations, policy => policy.RequireRole(
         nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
         nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator)));
+    options.AddPolicy(AuthorizationPolicies.ManageUsers, policy => policy.RequireRole(
+        nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator)));
     options.AddPolicy(AuthorizationPolicies.Operate, policy => policy.RequireRole(
         nameof(BerMap.Domain.Enums.UserRole.PlatformAdministrator),
         nameof(BerMap.Domain.Enums.UserRole.IntegrationAdministrator),

@@ -98,6 +98,37 @@ public class AuthController : ControllerBase
         return Ok(ToDto(user, PrimaryRole(user)));
     }
 
+    public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+
+    [EnableRateLimiting("login")]
+    [HttpPost("change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId && u.IsActive, cancellationToken);
+        if (user == null)
+            return Unauthorized();
+
+        if (!PasswordHasher.Verify(request.CurrentPassword ?? string.Empty, user.PasswordHash))
+            return BadRequest(new { message = "Mevcut parola hatalı.", code = "invalid_current_password" });
+
+        if (PasswordPolicy.Validate(request.NewPassword, user.Username) is { } passwordError)
+            return BadRequest(new { message = passwordError, code = "weak_password" });
+
+        if (request.NewPassword == request.CurrentPassword)
+            return BadRequest(new { message = "Yeni parola mevcut paroladan farklı olmalıdır.", code = "password_unchanged" });
+
+        user.PasswordHash = PasswordHasher.Hash(request.NewPassword);
+        user.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync(cancellationToken);
+
+        await _auditService.LogAsync(user.Id.ToString(), user.Username, "Auth.PasswordChanged", "User", user.Id.ToString(),
+            "{}", HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty, true, cancellationToken);
+        return NoContent();
+    }
+
     private static string PrimaryRole(User user) =>
         user.Roles
             .Select(r => r.Role.RoleType)

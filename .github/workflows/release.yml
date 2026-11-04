@@ -1,0 +1,156 @@
+name: Release
+
+# v* etiketiyle tetiklenir: Windows ve Linux sunucu paketleri üretilir, ikisi de temiz
+# çalıştırıcılarda gerçekten kurulup sağlık ve giriş kontrolünden geçer, ardından
+# SHA256SUMS.txt ile GitHub Releases'a yüklenir. workflow_dispatch aynı paketleri
+# ve kurulum testlerini yayınlamadan çalıştırır.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Sürüm (ör. 0.3.0); yalnız paketler ve kurulum testleri çalışır"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Sürümü belirle
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="${{ github.event.inputs.version }}"; fi
+          PROPS=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "$VERSION" != "$PROPS" ]; then
+            echo "Etiket $VERSION, Directory.Build.props $PROPS: sürümler aynı olmalı." >&2; exit 1
+          fi
+          test -f "docs/releases/$VERSION.md" || { echo "docs/releases/$VERSION.md eksik" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/BerMap.Web/package-lock.json
+      - name: Web konsolu
+        working-directory: src/BerMap.Web
+        run: npm ci && npm run build
+      - name: Sunucu paketleri
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: |
+          for rid in win-x64 linux-x64 linux-arm64; do deploy/package.sh "$VERSION" "$rid" out; done
+          (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: out/
+
+  install-linux:
+    needs: package
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: bermap
+          POSTGRES_PASSWORD: release-test
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U bermap" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+      - name: Kur, giriş yap, yükselt, kaldır
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS.txt
+          tar xzf "bermap-server-$VERSION-linux-x64.tar.gz"
+          cd "bermap-server-$VERSION-linux-x64"
+          sudo BERMAP_DB_PASSWORD=release-test ./install.sh --db-host localhost --db-user bermap
+          PW=$(sudo sed -n 's/^password: //p' /var/lib/bermap/vault/initial-admin-password.txt)
+          curl -fsS http://localhost:8080/ | grep -q '<div id="root">'
+          curl -fsS http://localhost:8080/health | grep -q "\"version\":\"$VERSION"
+          curl -fsS -X POST http://localhost:8080/api/auth/login -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | grep -q '"token"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/dashboard/summary)" = 401
+          sudo ./install.sh   # yükseltme: yapılandırma korunur
+          curl -fsS http://localhost:8080/healthz/ready
+          sudo ./uninstall.sh
+          ! systemctl is-active --quiet bermap-server
+
+  install-windows:
+    needs: package
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+      - name: PostgreSQL
+        shell: powershell
+        run: |
+          $svc = Get-Service -Name 'postgresql*' | Select-Object -First 1
+          Set-Service -Name $svc.Name -StartupType Manual
+          Start-Service -Name $svc.Name
+      - name: Kur, giriş yap, yükselt, kaldır (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive "BerMap-Server-$env:VERSION-win-x64.zip" -DestinationPath pkg
+          Set-Location "pkg\BerMap-Server-$env:VERSION-win-x64"
+          # windows-latest ships PostgreSQL with user postgres / password root (PGUSER/PGPASSWORD).
+          $dbUser = if ($env:PGUSER) { $env:PGUSER } else { 'postgres' }
+          $pw = ConvertTo-SecureString $(if ($env:PGPASSWORD) { $env:PGPASSWORD } else { 'root' }) -AsPlainText -Force
+          .\Install-BerMapServer.ps1 -DbHost localhost -DbUser $dbUser -DbPassword $pw -DbName bermap_release
+          $admin = (Get-Content "$env:ProgramData\BerMap\vault\initial-admin-password.txt" | Where-Object { $_ -like 'password:*' }) -replace '^password: ', ''
+          $index = Invoke-WebRequest http://localhost:8080/ -UseBasicParsing
+          if ($index.Content -notmatch '<div id="root">') { throw 'Console was not served.' }
+          $health = Invoke-RestMethod http://localhost:8080/health
+          if (-not $health.version.StartsWith($env:VERSION)) { throw "Unexpected version $($health.version)" }
+          $login = Invoke-RestMethod http://localhost:8080/api/auth/login -Method Post -ContentType 'application/json' `
+            -Body (@{ username = 'admin'; password = $admin } | ConvertTo-Json)
+          if (-not $login.token) { throw 'Login failed.' }
+          if ((Get-Service BerMapServer).StartType -ne 'Automatic') { throw 'Service is not automatic.' }
+          .\Install-BerMapServer.ps1   # yükseltme: yapılandırma korunur
+          Invoke-RestMethod http://localhost:8080/healthz/ready | Out-Null
+          .\Uninstall-BerMapServer.ps1
+          if (Get-Service BerMapServer -ErrorAction SilentlyContinue) { throw 'Service was not removed.' }
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [package, install-linux, install-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: out
+      - name: GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --title "BerMap $VERSION" \
+            --notes-file "docs/releases/$VERSION.md" \
+            --latest
