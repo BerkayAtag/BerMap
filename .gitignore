@@ -42,3 +42,6 @@ coverage/
 
 # Local credential vault (master key + encrypted secrets)
 .bermap-vault/
+
+# Vite dependency cache (e.g. when previewing site/ with vite)
+.vite/
