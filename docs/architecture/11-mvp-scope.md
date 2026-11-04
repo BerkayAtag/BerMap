@@ -1,6 +1,6 @@
 # 11 — MVP Scope (Phase 1 & Phase 2 Foundation)
 
-> **BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform**  
+> **BerMap — Enterprise Infrastructure Intelligence & Simulation Platform**  
 > *"Discover. Map. Analyze. Simulate. Predict."*
 
 ---
@@ -49,7 +49,7 @@ The MVP (Minimum Viable Product) establishes the production foundation of BerMap
   - Cross-source identity reconciliation using FQDN, BIOS UUID, and MAC address rules.
   - Ingestion into PostgreSQL typed node/edge graph model.
 
-### 2.4 Simulation Studio Prototype (BerTwin)
+### 2.4 Simulation Studio Prototype (BerSim)
 - **What-If Host Failure Simulation**:
   - Selecting an ESXi host to simulate failure.
   - Calculating direct blast radius: impacted VMs, databases, and hosted application services.

@@ -1,4 +1,4 @@
-# BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform
+# BerMap — Enterprise Infrastructure Intelligence & Simulation Platform
 
 > **"Discover. Map. Analyze. Simulate. Predict."**  
 > *Fully On-Premises | Air-Gapped | Preview (0.1)*
@@ -9,9 +9,9 @@
 
 ## 1. What is BerMap?
 
-**BerMap** is an enterprise-grade infrastructure discovery, dependency mapping, blast-radius impact analysis, and Digital Twin simulation platform designed from the ground up for strictly on-premises, air-gapped corporate environments (banking, telecommunications, healthcare, defense, and public utilities).
+**BerMap** is an enterprise-grade infrastructure discovery, dependency mapping, blast-radius impact analysis, and what-if simulation platform designed from the ground up for strictly on-premises, air-gapped corporate environments (banking, telecommunications, healthcare, defense, and public utilities).
 
-BerMap automatically connects to enterprise infrastructure systems (Active Directory, VMware vCenter, Zabbix, Microsoft SCCM/MECM, SQL Server, and Network devices), reconciles physical and virtual assets into a unified graph data model, visualizes complex dependencies in real time, and allows systems engineers to **simulate changes and failures before touching production** via the integrated **Simulation Studio (BerTwin)**.
+BerMap automatically connects to enterprise infrastructure systems (Active Directory, VMware vCenter, Zabbix, Microsoft SCCM/MECM, SQL Server, and Network devices), reconciles physical and virtual assets into a unified graph data model, visualizes complex dependencies in real time, and allows systems engineers to **simulate changes and failures before touching production** via the integrated **Simulation Studio (BerSim)**.
 
 ---
 
@@ -46,7 +46,7 @@ BerMap/
 │   ├── BerMap.Contracts/        # Shared DTOs, integration interfaces, collector protocol
 │   ├── BerMap.Worker/           # Background discovery & synchronization worker
 │   ├── BerMap.Collector/        # Standalone, outbound-only collection agent
-│   ├── BerMap.Simulation/       # Deterministic Digital Twin simulation engine (BerTwin)
+│   ├── BerMap.Simulation/       # Deterministic what-if simulation engine (BerSim)
 │   ├── BerMap.Integrations/     # Integration adapter implementations
 │   │   ├── ActiveDirectory/     # LDAP/LDAPS directory discovery adapter
 │   │   └── VMware/              # vSphere REST/SOAP hypervisor adapter

@@ -1,6 +1,6 @@
 # 01 — System Overview
 
-> **BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform**
+> **BerMap — Enterprise Infrastructure Intelligence & Simulation Platform**
 >
 > *"Discover. Map. Analyze. Simulate. Predict."*
 
@@ -8,9 +8,9 @@
 
 ## 1. Product Description
 
-BerMap is an on-premises, air-gapped enterprise platform that automatically discovers IT infrastructure, builds a unified dependency graph, and provides a deterministic Digital Twin simulation engine. It enables infrastructure teams to understand the full topology of their environment—physical hosts, virtual machines, applications, databases, network devices, and their interconnections—and to answer **"what happens if…?"** questions *before* making changes.
+BerMap is an on-premises, air-gapped enterprise platform that automatically discovers IT infrastructure, builds a unified dependency graph, and provides a deterministic what-if simulation engine. It enables infrastructure teams to understand the full topology of their environment—physical hosts, virtual machines, applications, databases, network devices, and their interconnections—and to answer **"what happens if…?"** questions *before* making changes.
 
-BerMap and **BerTwin** (the simulation engine) are a **single integrated product**. Simulation is not a bolt-on module; it is a core capability that operates on the same dependency graph built by discovery.
+BerMap and **BerSim** (the simulation engine) are a **single integrated product**. Simulation is not a bolt-on module; it is a core capability that operates on the same dependency graph built by discovery.
 
 ### Core Capabilities
 
@@ -19,7 +19,7 @@ BerMap and **BerTwin** (the simulation engine) are a **single integrated product
 | **Discovery** | Agentless and collector-based discovery of infrastructure via integration adapters (AD, vCenter, Zabbix, SCCM, SQL Server, etc.) |
 | **Dependency Graph** | Typed node-edge graph model representing all infrastructure entities and their relationships |
 | **Impact Analysis** | Traverse the dependency graph to determine the blast radius of any component failure |
-| **Digital Twin (BerTwin)** | Snapshot-based deterministic simulation engine — model failures, migrations, and capacity changes before execution |
+| **Simulation (BerSim)** | Snapshot-based deterministic simulation engine — model failures, migrations, and capacity changes before execution |
 | **Capacity Intelligence** | Track resource utilization trends, forecast exhaustion, and plan capacity |
 | **Event Correlation** | Correlate monitoring events across infrastructure layers to surface root causes |
 | **Reporting** | Export topology maps, impact reports, simulation results, and compliance data |
@@ -154,7 +154,7 @@ graph TB
 ## 6. Design Principles
 
 1. **Offline-First** — Every feature must work without internet access. No CDN, no telemetry, no external API calls.
-2. **Deterministic Simulation** — BerTwin simulation results are reproducible given the same snapshot and scenario. AI interprets results but never replaces the engine.
+2. **Deterministic Simulation** — BerSim simulation results are reproducible given the same snapshot and scenario. AI interprets results but never replaces the engine.
 3. **Adapter Isolation** — A failure in one integration adapter must not affect discovery from other adapters.
 4. **Schema Extensibility** — JSONB metadata columns allow any integration to store arbitrary properties without schema changes.
 5. **Least Privilege** — RBAC enforced at API layer; collectors authenticate with scoped certificates; database credentials are encrypted at rest.

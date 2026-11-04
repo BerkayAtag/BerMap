@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="BerMap: kurum içi altyapı keşfi, bağımlılık haritası, etki analizi ve dijital ikiz simülasyonu.">
+<meta name="description" content="BerMap: kurum içi altyapı keşfi, bağımlılık haritası, etki analizi ve değişiklik simülasyonu.">
 <meta name="color-scheme" content="light dark">
-<meta property="og:title" content="BerMap — Altyapı İstihbaratı ve Dijital İkiz">
+<meta property="og:title" content="BerMap — Altyapı İstihbaratı ve Simülasyon">
 <meta property="og:description" content="Active Directory ve vCenter'ı salt okunur keşfedin, varlıkları tek grafta uzlaştırın, bir değişikliğin etkisini üretime dokunmadan simüle edin.">
 <meta property="og:image" content="https://berkayatag.github.io/BerMap/assets/dashboard.png">
-<title>BerMap — Altyapı İstihbaratı ve Dijital İkiz</title>
+<title>BerMap — Altyapı İstihbaratı ve Simülasyon</title>
 <link rel="icon" type="image/svg+xml" href="assets/bermap.svg">
 <link rel="stylesheet" href="style.css?v=0.1.0">
 <script>
@@ -24,7 +24,7 @@
 <body>
 <a class="skip" href="#main">İçeriğe geç</a>
 <header class="top">
-  <a class="brand" href="#"><img src="assets/bermap.svg" alt="" width="36" height="36"><span>BerMap<small>Infrastructure Intelligence &amp; Digital Twin</small></span></a>
+  <a class="brand" href="#"><img src="assets/bermap.svg" alt="" width="36" height="36"><span>BerMap<small>Infrastructure Intelligence &amp; Simulation</small></span></a>
   <nav aria-label="Ana menü">
     <a href="#ozellikler">Özellikler</a>
     <a href="#ekranlar">Ekranlar</a>
@@ -42,7 +42,7 @@
   <section class="hero">
     <div class="hero-copy">
       <p class="eyebrow">Sürüm 0.2 · Önizleme · <span lang="en">Windows Server</span> ve <span lang="en">Linux</span></p>
-      <h1>Altyapınızı haritalayın.<br><em>Değişikliği önce ikizde deneyin.</em></h1>
+      <h1>Altyapınızı haritalayın.<br><em>Değişikliği önce simülasyonda deneyin.</em></h1>
       <p class="lead">BerMap, Active Directory ve vCenter'ı salt okunur keşfeder, sunucuları, sanal makineleri ve bağımlılıkları tek bir grafta uzlaştırır. Bir host çökerse neyin etkileneceğini üretime dokunmadan görürsünüz.</p>
       <div class="actions">
         <a class="button" href="https://github.com/BerkayAtag/BerMap">Kaynak koda git <span aria-hidden="true">↗</span></a>
@@ -74,7 +74,7 @@
       <article><span class="num">02 / Uzlaştırma</span><h3>Tek varlık, çok kaynak</h3><p>Bir sunucu AD'de bilgisayar, vCenter'da sanal makine olarak görünür. SID, BIOS UUID ve FQDN ile tek düğümde birleşir; yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.</p></article>
       <article><span class="num">03 / Harita</span><h3>Bağımlılık grafı</h3><p>Datacenter, cluster, host, VM, datastore, ağ ve uygulama ilişkileri etkileşimli haritada. Eski (stale) kayıtlar silinmez, geçmiş bağlam için işaretlenir.</p></article>
       <article><span class="num">04 / Etki</span><h3>Patlama yarıçapı</h3><p>Bir düğüm seçin; ona bağlı uygulamaları, veritabanlarını ve servisleri derinlik ve güven düzeyiyle görün. Değişiklik toplantısına kanıtla gelin.</p></article>
-      <article><span class="num">05 / BerTwin</span><h3>Dijital ikiz simülasyonu</h3><p>Host arızası, datastore kaybı ve ağ bölünmesi senaryoları deterministik motorla hesaplanır; cluster'da failover için CPU ve bellek payı kalıyor mu, risk puanı ne, görürsünüz.</p></article>
+      <article><span class="num">05 / BerSim</span><h3>Değişiklik simülasyonu</h3><p>Host arızası, datastore kaybı ve ağ bölünmesi senaryoları deterministik motorla hesaplanır; cluster'da failover için CPU ve bellek payı kalıyor mu, risk puanı ne, görürsünüz.</p></article>
       <article><span class="num">06 / Denetim</span><h3>Snapshot ve iz kaydı</h3><p>Grafın değişmez, hash'li anlık görüntülerini alın ve karşılaştırın. Giriş, entegrasyon ve keşif işlemlerinin her biri kullanıcı adıyla denetim kaydı bırakır.</p></article>
     </div>
   </section>
@@ -115,7 +115,7 @@
       <strong class="arrow">salt okunur →</strong>
       <div class="central"><span>Kurum sunucusu</span><h3>BerMap API + keşif işçisi</h3><p>Uzlaştırma · Graf · Simülasyon · Denetim</p><div class="services"><span>PostgreSQL</span><span>.NET 10</span><span>Şifreli kasa</span></div></div>
       <strong class="arrow">← HTTPS</strong>
-      <div><span>Operatör</span><h3>Web konsolu</h3><p>Yerel hesap ve roller<br>Harita ve etki analizi<br>BerTwin simülasyonu</p></div>
+      <div><span>Operatör</span><h3>Web konsolu</h3><p>Yerel hesap ve roller<br>Harita ve etki analizi<br>BerSim simülasyonu</p></div>
     </div>
     <p class="note">Collector yalnız dışarı yönlü bağlantı kurar ve kayıt token'ıyla kimlik doğrular; sunucuya ulaşamadığında verileri yerel kuyrukta tutar. GitHub Pages yalnız bu tanıtım sayfasını sunar; konsol ve envanter verileri GitHub'da çalışmaz.</p>
   </section>

@@ -176,7 +176,7 @@ Base unit: **4px**
 | 3 | **Infrastructure** | `Server` | `/infrastructure` | Entity inventory browser with filters |
 | 4 | **Dependencies** | `GitFork` | `/dependencies` | Dependency graph explorer |
 | 5 | **Impact Analysis** | `Zap` | `/impact` | Blast radius calculator |
-| 6 | **Simulation Studio** | `FlaskConical` | `/simulations` | BerTwin simulation workspace |
+| 6 | **Simulation Studio** | `FlaskConical` | `/simulations` | BerSim simulation workspace |
 | 7 | **Capacity** | `BarChart3` | `/capacity` | Capacity metrics and forecasting |
 | 8 | **Integrations** | `Plug` | `/integrations` | Integration adapter management |
 | 9 | **Collectors** | `Radio` | `/collectors` | Collector status and management |

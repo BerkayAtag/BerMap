@@ -1,6 +1,6 @@
 # 12 — Sprint-Based Development Plan
 
-> **BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform**  
+> **BerMap — Enterprise Infrastructure Intelligence & Simulation Platform**  
 > *"Discover. Map. Analyze. Simulate. Predict."*
 
 ---
@@ -21,7 +21,7 @@ gantt
     Phase 3 Deep Infrastructure Discovery:        p3, 2027-01-10, 2027-02-20
     Phase 4 Advanced Dependency Mapping :         p4, 2027-02-21, 2027-03-20
     section Simulation & Intelligence
-    Phase 5 Digital Twin & BerTwin Engine:        p5, 2027-03-21, 2027-04-17
+    Phase 5 Simulation & BerSim Engine:        p5, 2027-03-21, 2027-04-17
     Phase 6 Enterprise Integrations (SCCM/ZBX):  p6, 2027-04-18, 2027-05-29
     Phase 7 Local AI Intelligence (Ollama):       p7, 2027-05-30, 2027-06-26
     section Hardening
@@ -80,7 +80,7 @@ gantt
   - Visual blast radius highlighting on React Flow canvas with impact category classification.
   - Deliverables: Select any server or switch and instantly view affected business applications.
 
-### Phase 5: Digital Twin & Simulation Studio (BerTwin) (Sprints 10–11)
+### Phase 5: Simulation Studio (BerSim) (Sprints 10–11)
 - **Sprint 10: Deterministic Simulation Engine**
   - Implement snapshot cloning into in-memory simulation workspace.
   - Deterministic failure modeling: ESXi host outage, Datastore loss, Network link cut.

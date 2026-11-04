@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-BerMap requires persistent storage for enterprise inventory, users, roles, audit trails, and configuration, while also needing graph traversal capabilities for dependency mapping, blast-radius impact analysis, and Digital Twin simulations.
+BerMap requires persistent storage for enterprise inventory, users, roles, audit trails, and configuration, while also needing graph traversal capabilities for dependency mapping, blast-radius impact analysis, and what-if simulations.
 
 Introducing a specialized graph database (e.g., Neo4j) or dedicated cache (e.g., Redis) or search engine (e.g., Elasticsearch) in the first release would drastically increase deployment friction, memory footprint, licensing costs, and operational failure surface in air-gapped on-premises datacenters.
 

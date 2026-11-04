@@ -1,4 +1,4 @@
-# 08 — Simulation Engine (BerTwin)
+# 08 — Simulation Engine (BerSim)
 
 > **"Simulate Before You Change"**
 
@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-The BerTwin Simulation Engine is BerMap's Digital Twin capability. It enables infrastructure teams to model **what-if scenarios** against a frozen snapshot of the dependency graph and compute deterministic impact analysis — before any real change is made.
+The BerSim Simulation Engine is BerMap's what-if simulation capability. It enables infrastructure teams to model **what-if scenarios** against a frozen snapshot of the dependency graph and compute deterministic impact analysis — before any real change is made.
 
 ### Key Properties
 

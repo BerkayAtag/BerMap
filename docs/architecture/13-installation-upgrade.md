@@ -1,6 +1,6 @@
 # 13 — Installation, Upgrade & Rollback Architecture
 
-> **BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform**  
+> **BerMap — Enterprise Infrastructure Intelligence & Simulation Platform**  
 > *"Discover. Map. Analyze. Simulate. Predict."*
 
 ---

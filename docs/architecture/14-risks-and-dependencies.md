@@ -1,6 +1,6 @@
 # 14 — Critical Risks, Dependencies & Mitigations
 
-> **BerMap — Enterprise Infrastructure Intelligence & Digital Twin Platform**  
+> **BerMap — Enterprise Infrastructure Intelligence & Simulation Platform**  
 > *"Discover. Map. Analyze. Simulate. Predict."*
 
 ---
