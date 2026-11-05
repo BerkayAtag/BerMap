@@ -65,6 +65,14 @@ export function scenarioForNodeType(nodeType: string | null | undefined): Scenar
   return SCENARIOS.find((scenario) => isValidTarget(scenario, nodeType)) ?? null;
 }
 
+/** Every node type some scenario can fail, in scenario order. */
+export const SIMULATABLE_NODE_TYPES: readonly string[] = [...new Set(SCENARIOS.flatMap((scenario) => SCENARIO_TARGET_TYPES[scenario]))];
+
+/** Whether any scenario accepts the node type; links to the Studio are shown only then. */
+export function canSimulate(nodeType: string | null | undefined): boolean {
+  return scenarioForNodeType(nodeType) !== null;
+}
+
 export function scenarioLabel(scenario: string, isTr: boolean): string {
   const normalized = normalizeScenario(scenario);
   if (!normalized) return scenario;

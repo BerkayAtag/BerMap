@@ -68,7 +68,7 @@ public class AuthController : ControllerBase
         BearerTokenAuthenticationHandler.InvalidateUserState(_cache, user.Id);
 
         var role = PrimaryRole(user);
-        var (token, expiresAt) = _tokens.Issue(user.Id, user.Username, user.DisplayName, role);
+        var (token, expiresAt) = _tokens.Issue(user.Id, user.Username, user.DisplayName, role, user.SecurityStamp);
 
         await _auditService.LogAsync(user.Id.ToString(), user.Username, "Auth.Login", "User", user.Id.ToString(),
             System.Text.Json.JsonSerializer.Serialize(new { role }), HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty, true, cancellationToken);
@@ -100,6 +100,11 @@ public class AuthController : ControllerBase
 
     public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 
+    /// <summary>
+    /// Changes the caller's password and revokes every token issued for the
+    /// account before, including the one used for this request. The response
+    /// carries a fresh token ({ token, expiresAt }) for the caller's session.
+    /// </summary>
     [EnableRateLimiting("login")]
     [HttpPost("change-password")]
     public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request, CancellationToken cancellationToken)
@@ -107,7 +112,9 @@ public class AuthController : ControllerBase
         if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
             return Unauthorized();
 
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId && u.IsActive, cancellationToken);
+        var user = await _context.Users
+            .Include(u => u.Roles).ThenInclude(r => r.Role)
+            .FirstOrDefaultAsync(u => u.Id == userId && u.IsActive, cancellationToken);
         if (user == null)
             return Unauthorized();
 
@@ -121,12 +128,16 @@ public class AuthController : ControllerBase
             return BadRequest(new { message = "Yeni parola mevcut paroladan farklı olmalıdır.", code = "password_unchanged" });
 
         user.PasswordHash = PasswordHasher.Hash(request.NewPassword);
+        user.RotateSecurityStamp();
         user.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync(cancellationToken);
+        BearerTokenAuthenticationHandler.InvalidateUserState(_cache, user.Id);
 
         await _auditService.LogAsync(user.Id.ToString(), user.Username, "Auth.PasswordChanged", "User", user.Id.ToString(),
             "{}", HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty, true, cancellationToken);
-        return NoContent();
+
+        var (token, expiresAt) = _tokens.Issue(user.Id, user.Username, user.DisplayName, PrimaryRole(user), user.SecurityStamp);
+        return Ok(new { token, expiresAt });
     }
 
     private static string PrimaryRole(User user) =>

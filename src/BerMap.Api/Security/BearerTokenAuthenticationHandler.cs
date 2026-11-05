@@ -17,10 +17,14 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
 {
     public const string SchemeName = "BerMapBearer";
 
-    // How long a user's active flag and role are trusted before the database
-    // is consulted again. Disabling an account or changing a role takes
-    // effect within this window instead of when the token expires.
+    // How long a user's active flag, role and security stamp are trusted
+    // before the database is consulted again. This instance drops its cache
+    // entry as soon as it changes them; other API instances notice within
+    // this window instead of when the token expires.
     private static readonly TimeSpan UserStateCacheDuration = TimeSpan.FromSeconds(30);
+
+    // Cached for missing or disabled accounts, so they are not re-read on every request.
+    private static readonly UserState Rejected = new(null, string.Empty);
 
     private readonly AccessTokenService _tokens;
     private readonly IMemoryCache _cache;
@@ -50,44 +54,55 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
         if (principal == null || !Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
             return AuthenticateResult.Fail("Invalid or expired access token.");
 
-        var currentRole = await GetCurrentRoleAsync(userId);
-        if (currentRole == null)
+        var state = await GetUserStateAsync(userId);
+        if (state.Role == null)
             return AuthenticateResult.Fail("The user account no longer exists or is disabled.");
+
+        // A password reset or change, deactivation or role change replaces the
+        // stamp, which revokes every token issued before it.
+        if (!string.Equals(principal.FindFirstValue(AccessTokenService.SecurityStampClaimType), state.SecurityStamp,
+                StringComparison.Ordinal))
+            return AuthenticateResult.Fail("The access token has been revoked.");
 
         // Authorization uses the role the user has now, not the one in the token.
         var identity = (ClaimsIdentity)principal.Identity!;
         foreach (var claim in identity.FindAll(ClaimTypes.Role).ToList())
             identity.RemoveClaim(claim);
-        identity.AddClaim(new Claim(ClaimTypes.Role, currentRole));
+        identity.AddClaim(new Claim(ClaimTypes.Role, state.Role));
 
         return AuthenticateResult.Success(new AuthenticationTicket(principal, SchemeName));
     }
 
     private static string UserStateCacheKey(Guid userId) => "auth-user-state:" + userId;
 
-    /// <summary>Drops the cached active flag/role so the next request reads the database.</summary>
+    /// <summary>
+    /// Drops the cached active flag, role and security stamp so the next
+    /// request reads the database. Call it after changing any of them.
+    /// </summary>
     public static void InvalidateUserState(IMemoryCache cache, Guid userId) => cache.Remove(UserStateCacheKey(userId));
 
-    /// <summary>Returns the user's primary role, or null when the account is missing or disabled.</summary>
-    private async Task<string?> GetCurrentRoleAsync(Guid userId)
+    /// <summary>Returns the user's primary role (null when the account is missing or disabled) and security stamp.</summary>
+    private async Task<UserState> GetUserStateAsync(Guid userId)
     {
         var cacheKey = UserStateCacheKey(userId);
-        if (_cache.TryGetValue(cacheKey, out string? cached))
-            return cached == string.Empty ? null : cached;
+        if (_cache.TryGetValue(cacheKey, out UserState? cached) && cached != null)
+            return cached;
 
         var user = await _context.Users
             .AsNoTracking()
             .Where(u => u.Id == userId)
-            .Select(u => new { u.IsActive, Roles = u.Roles.Select(r => r.Role.RoleType).ToList() })
+            .Select(u => new { u.IsActive, u.SecurityStamp, Roles = u.Roles.Select(r => r.Role.RoleType).ToList() })
             .FirstOrDefaultAsync(Context.RequestAborted);
 
-        string? role = user is { IsActive: true }
-            ? user.Roles.DefaultIfEmpty(UserRole.ReadOnlyViewer).Min().ToString()
-            : null;
+        var state = user is { IsActive: true }
+            ? new UserState(user.Roles.DefaultIfEmpty(UserRole.ReadOnlyViewer).Min().ToString(), user.SecurityStamp)
+            : Rejected;
 
-        _cache.Set(cacheKey, role ?? string.Empty, UserStateCacheDuration);
-        return role;
+        _cache.Set(cacheKey, state, UserStateCacheDuration);
+        return state;
     }
+
+    private sealed record UserState(string? Role, string SecurityStamp);
 
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)
     {

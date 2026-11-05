@@ -1,113 +1,104 @@
-# BerMap — Enterprise Infrastructure Intelligence & Simulation Platform
+<p align="center"><img src="site/assets/bermap.svg" width="84" height="84" alt="BerMap logosu"></p>
 
-> **"Discover. Map. Analyze. Simulate. Predict."**  
-> *Fully On-Premises | Air-Gapped | Preview (0.1)*
+<h1 align="center">BerMap</h1>
 
-**Product page:** https://berkayatag.github.io/BerMap/
+<p align="center"><b>Altyapınızı haritalayın. Değişikliği önce simülasyonda deneyin.</b><br>Kurum içi keşif · Bağımlılık haritası · Etki ve kapasite simülasyonu</p>
 
----
+<p align="center">
+  <a href="https://github.com/BerkayAtag/BerMap/releases/latest"><b>Sunucu paketini indir (0.3.0)</b></a> ·
+  <a href="https://berkayatag.github.io/BerMap/">Tanıtım sayfası</a> ·
+  <a href="deploy/KURULUM.md">Kurulum</a> ·
+  <a href="CHANGELOG.md">Sürüm geçmişi</a> ·
+  <a href="SECURITY.md">Güvenlik</a>
+</p>
 
-## 1. What is BerMap?
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/dashboard-dark.png">
+  <img src="site/assets/dashboard.png" alt="BerMap gösterge paneli — sentetik demo verisi">
+</picture>
 
-**BerMap** is an enterprise-grade infrastructure discovery, dependency mapping, blast-radius impact analysis, and what-if simulation platform designed from the ground up for strictly on-premises, air-gapped corporate environments (banking, telecommunications, healthcare, defense, and public utilities).
+BerMap, Active Directory ve VMware vCenter'ı **salt okunur** keşfeder; sunucuları, sanal makineleri, depolamayı, ağları ve uygulama bağımlılıklarını tek bir grafta uzlaştırır. Bir host, datastore, ağ ya da iş yükü düşerse neyin etkileneceğini ve cluster'da failover için kapasite kalıp kalmadığını üretime dokunmadan görürsünüz. Tüm veriler kurum içinde kalır; çalışmak için internet gerekmez.
 
-BerMap connects to enterprise infrastructure systems (Active Directory and VMware vCenter today; Zabbix, Microsoft SCCM/MECM, SQL Server and network-device adapters are planned), reconciles physical and virtual assets into a unified graph data model, visualizes complex dependencies in real time, and allows systems engineers to **simulate changes and failures before touching production** via the integrated **Simulation Studio (BerSim)**.
+## Kurulum
 
----
+[Son sürüm](https://github.com/BerkayAtag/BerMap/releases/latest) sayfasından sunucu paketini ve `SHA256SUMS.txt` dosyasını indirin. Paketler self-contained'dir (sunucuda .NET gerekmez) ve web konsolunu içerir. Tek ön koşul erişilebilir bir **PostgreSQL 16+** sunucusudur; BerMap veritabanını ve şemayı ilk açılışta kurar.
 
-## 2. Architectural Pillars
+**Windows Server** — `BerMap-Server-0.3.0-win-x64.zip` paketini açıp yönetici PowerShell'de:
 
-- **Windows Server Native (ADR-001)**: Primary enterprise host OS (Windows Server 2022/2025) running as native Windows Services without requiring Docker, WSL, or Kubernetes. Linux is supported via an offline Docker Compose bundle.
-- **Modular Monolith (ADR-002)**: Single cohesive central server with strictly bounded domain modules (`Identity`, `Inventory`, `Integration`, `Discovery`, `Graph`, `Impact`, `Simulation`, `Capacity`, `Events`, `Reporting`, `Audit`).
-- **PostgreSQL 16+ Primary Datastore (ADR-003)**: Relational inventory, JSONB metadata, audit logging, and graph model with recursive CTEs in a single ACID datastore. Zero mandatory Redis, Neo4j, or Elasticsearch dependencies.
-- **Red & White Design Identity (ADR-004)**: High-contrast, executive-level enterprise web console with instant Light / Dark mode toggle and WCAG 2.1 AA accessibility.
-- **100% Air-Gapped & Offline**: Zero telemetry, zero external CDN / Google Fonts, zero SaaS dependencies, completely offline installation and upgrade.
-
----
-
-## 3. Technology Stack
-
-- **Backend**: .NET 10 LTS, C# 13, ASP.NET Core Web API, Entity Framework Core 10, Npgsql
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, React Flow / XYFlow, TanStack Query, Zustand, ECharts, Lucide Icons
-- **Database**: PostgreSQL 16+ with UUIDs, JSONB, and Recursive CTEs
-- **Security**: PBKDF2-SHA256 password hashing, HMAC-signed bearer tokens, role-based authorization, AES-256-GCM credential vault, enrollment-token authenticated collectors (see [SECURITY.md](SECURITY.md))
-
----
-
-## 4. Repository Structure
-
-```text
-BerMap/
-├── src/
-│   ├── BerMap.Api/              # ASP.NET Core Web API host, controllers, discovery scheduler & job runner
-│   ├── BerMap.Application/      # CQRS handlers, DTOs, domain service interfaces
-│   ├── BerMap.Domain/           # Pure domain entities, value objects, enums
-│   ├── BerMap.Infrastructure/   # EF Core DbContext, PostgreSQL repos, audit, security
-│   ├── BerMap.Contracts/        # Shared DTOs, integration interfaces, collector protocol
-│   ├── BerMap.Collector/        # Standalone, outbound-only collection agent
-│   ├── BerMap.Simulation/       # Deterministic what-if simulation engine (BerSim)
-│   ├── BerMap.Integrations/     # Integration adapter implementations
-│   │   ├── ActiveDirectory/     # LDAP/LDAPS directory discovery adapter
-│   │   └── VMware/              # vSphere REST/SOAP hypervisor adapter
-│   └── BerMap.Web/              # React + TypeScript + Vite management console
-├── tests/
-│   ├── BerMap.Tests.Unit/       # Unit tests for domain, graph, and simulation
-│   └── BerMap.Tests.Integration/# Integration tests with PostgreSQL
-├── docs/
-│   ├── architecture/            # 14 technical architecture specifications
-│   └── adr/                     # Architecture Decision Records (ADR-001 to ADR-005)
-├── site/                        # Product page published to GitHub Pages
-├── README.md
-├── CONTRIBUTING.md
-└── SECURITY.md
+```powershell
+.\Install-BerMapServer.ps1 -DbHost localhost -DbUser bermap
 ```
 
----
+**Linux (systemd)** — `bermap-server-0.3.0-linux-x64.tar.gz` (veya `linux-arm64`):
 
-## 5. Quick Start (Development)
-
-### Prerequisites
-- .NET 10 SDK
-- Node.js 20+ and npm 10+
-- PostgreSQL 16+ (a local instance or `docker run -d -p 5432:5432 -e POSTGRES_USER=bermap_dev -e POSTGRES_PASSWORD=bermap_dev -e POSTGRES_DB=bermap_dev postgres:17-alpine`)
-
-### Running the backend API
 ```bash
-cd src/BerMap.Api
-dotnet run --launch-profile http
+sudo ./install.sh --db-host localhost --db-user bermap
 ```
-- The API listens on `http://localhost:5294` and uses the `bermap_dev` connection string from `appsettings.Development.json`.
-- On first start it applies the EF Core migrations (`BerMap:Database:ApplyMigrationsOnStartup`), creates the built-in roles and a local administrator `admin`.
-- Set `BerMap:Bootstrap:AdminPassword` to choose the password; otherwise a random one is written to `initial-admin-password.txt` in the credential vault directory (`./.bermap-vault` in development). Delete that file after the first sign-in.
-- Health probes: `/healthz/live`, `/healthz/ready` (fails while migrations are pending).
 
-### Running the web console
+Betik dosyaları kopyalar, yapılandırmayı yazar, **BerMapServer** Windows servisini ya da `bermap-server` systemd servisini kurar, sunucu hazır olana kadar bekler ve sonunda konsol adresini, ilk yönetici (`admin`) parolasını ve collector kayıt token'ını yazar. Aynı betik yükseltme için de kullanılır; yapılandırma, kasa ve veritabanı korunur. HTTPS, port, dizinler ve kaldırma: [kurulum rehberi](deploy/KURULUM.md).
+
+Her sürüm yayımlanmadan önce paketler temiz Windows ve Linux çalıştırıcılarında gerçekten kurulur, giriş yapılır, yükseltilir ve kaldırılır ([release iş akışı](.github/workflows/release.yml)).
+
+## Ekranlar
+
+| Altyapı Haritası | Envanter ve Uzlaştırma |
+|---|---|
+| <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/map-dark.png"><img src="site/assets/map.png" alt="Altyapı haritası"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/inventory-dark.png"><img src="site/assets/inventory.png" alt="Envanter"></picture> |
+| **Simülasyon ve risk raporu** | **Entegrasyonlar** |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/simulation-dark.png"><img src="site/assets/simulation.png" alt="Simülasyon stüdyosu: host kesintisi, N-1 kapasite"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/integrations-dark.png"><img src="site/assets/integrations.png" alt="Entegrasyon yönetimi"></picture> |
+| **Kullanıcılar ve roller** | **Raporlar** |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/users-dark.png"><img src="site/assets/users.png" alt="Kullanıcı yönetimi"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="site/assets/reports-dark.png"><img src="site/assets/reports.png" alt="Raporlar ve dışa aktarımlar"></picture> |
+
+Ekranlar sentetik demo verisiyle gerçek uygulamadan alınmıştır. Konsol Türkçe ve İngilizce, aydınlık ve karanlık temada çalışır; telefonda menü çekmece olarak açılır.
+
+## Özellikler
+
+- **Salt okunur keşif:** Active Directory (LDAPS, sayfalı arama, birden çok domain/forest) ve vCenter (REST + PropertyCollector, host/VM kapasite metrikleri). Kaynak sistemlere hiçbir yazma yapılmaz; kimlik bilgileri AES-256-GCM ile şifreli kasada tutulur.
+- **Zamanlanmış keşif:** her entegrasyon için cron takvimi (sunucu saatiyle); kaçırılan çalışmalar yığılmaz, birden çok sunucuda tek kez çalışır. Uzak ağlar için dışarı yönlü bağlanan **collector**; çevrimdışıyken verileri yerel kuyrukta tutar.
+- **Uzlaştırma:** aynı sunucu AD'de bilgisayar, vCenter'da VM olarak görünse de SID, BIOS UUID ve FQDN ile tek düğüm olur. Yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.
+- **Altyapı haritası ve envanter:** katmanlı bağımlılık haritası, filtre, düğüm detayı; envanterde arama, filtre, CSV dışa aktarım ve inceleme kuyruğu.
+- **Simülasyon (BerSim):** host, datastore, ağ ve iş yükü kesintisi senaryoları. Doğrudan, olası ve mümkün etkiler bağımlılık yollarıyla; host arızasında cluster'ın **N-1** CPU/RAM payı ve HA durumu; risk skoru ve öneriler. Sonuç **yazdırılabilir değişiklik risk raporu** ya da Markdown olarak indirilir.
+- **Snapshot:** grafın değişmez, hash'li anlık görüntüleri; iki snapshot'ı karşılaştırma ve bütünlük doğrulama.
+- **Kullanıcılar ve roller:** yerel hesaplar (PBKDF2), Platform Yöneticisi, Entegrasyon Yöneticisi, Altyapı Operatörü, Güvenlik Denetçisi, Salt Okunur roller; parola değiştirme ve sıfırlama. Devre dışı bırakılan hesap 30 saniye içinde erişimini kaybeder.
+- **Denetim ve raporlar:** giriş, kullanıcı, entegrasyon, keşif ve snapshot işlemlerinin denetim kaydı (filtre, sayfalama, CSV); envanter, denetim ve snapshot dışa aktarımları (UTF-8, formül enjeksiyonuna karşı korumalı).
+
+## Mimari
+
+```
+Active Directory (LDAPS 636) ─┐                         ┌─ Web konsolu (HTTPS)
+vCenter (HTTPS 443) ──────────┼─► BerMap sunucusu ◄─────┤
+Uzak ağ ── Collector ─────────┘   API · keşif işçisi ·   └─ Yönetici / operatör
+          (dışarı yönlü HTTPS)     zamanlayıcı · BerSim
+                                         │
+                                    PostgreSQL 16+
+```
+
+Tek bir .NET 10 sunucusu (modüler monolit) API'yi, keşif işçisini, zamanlayıcıyı ve web konsolunu sunar; tüm durum PostgreSQL'dedir. Ayrıntılar: [mimari belgeler](docs/architecture), [ADR'ler](docs/adr).
+
+## Geliştirme
+
+Gerekenler: .NET 10 SDK, Node.js 20+, PostgreSQL 16+ (`docker run -d -p 5432:5432 -e POSTGRES_USER=bermap_dev -e POSTGRES_PASSWORD=bermap_dev -e POSTGRES_DB=bermap_dev postgres:17-alpine`).
+
 ```bash
-cd src/BerMap.Web
-npm install
-npm run dev
+cd src/BerMap.Api && dotnet run --launch-profile http        # http://localhost:5294
+cd src/BerMap.Web && npm install && npm run dev               # http://localhost:3000
 ```
-The console runs on `http://localhost:3000` and proxies `/api` to `BERMAP_API_URL` (default `http://localhost:5294`).
 
-### Tests
-```bash
-dotnet test BerMap.slnx
-cd src/BerMap.Web && npm run lint && npm run build
-```
-The PostgreSQL integration tests run when `BERMAP_TEST_CONNECTION_STRING` points at a server where the user may create databases; otherwise they are skipped.
+- İlk açılışta migration'lar uygulanır, roller ve `admin` hesabı oluşturulur. Parola `BerMap:Bootstrap:AdminPassword` ile verilmezse geliştirmede `src/BerMap.Api/.bermap-vault/initial-admin-password.txt` dosyasına yazılır.
+- Konsol `/api` isteklerini `BERMAP_API_URL` adresine (varsayılan `http://localhost:5294`) yönlendirir.
+- Testler: `dotnet test BerMap.slnx` ve `cd src/BerMap.Web && npm run lint && npm run build`. PostgreSQL entegrasyon testleri `BERMAP_TEST_CONNECTION_STRING` tanımlıysa çalışır.
+- Sunucu paketi: `deploy/package.sh <sürüm> <win-x64|linux-x64|linux-arm64> out` (önce web konsolunu derleyin).
 
-### Scheduled discovery
-Each integration has a five-field cron schedule (`minute hour day-of-month month day-of-week`, e.g. `0 2 * * *` for 02:00 daily; `*/15`, ranges, lists, `MON-FRI`, `@daily` are supported). The API checks schedules every 30 seconds and queues a full discovery when the first occurrence after the integration's last discovery has passed:
-- Schedules are evaluated in the server's local time zone; set `BerMap:DiscoveryScheduler:TimeZone` (e.g. `Europe/Istanbul`) to override.
-- After downtime only one missed run is caught up, and a manual discovery counts as the run for its slot.
-- Several API instances can share a database; a PostgreSQL advisory lock lets one of them schedule at a time.
-- `BerMap:DiscoveryScheduler:Enabled` (default `true`) and `PollSeconds` (default `30`) control the scheduler.
+Proje yapısı: `src/BerMap.Api` (sunucu), `BerMap.Application`/`Domain`/`Infrastructure` (iş mantığı ve veri), `BerMap.Integrations` (AD ve VMware adaptörleri), `BerMap.Simulation` (BerSim), `BerMap.Collector`, `BerMap.Web` (konsol), `deploy` (paketleme ve kurulum), `site` (tanıtım sayfası).
 
-### Known limitations of this preview
-- Simulations always run against the live graph, not a snapshot.
-- The collector enrolls, heartbeats and forwards queued batches, but does not run adapters itself yet.
+## Bilinen sınırlar
 
----
+- Yalnız Active Directory ve VMware vCenter adaptörleri vardır; Zabbix, SCCM/MECM, SQL Server ve ağ cihazı adaptörleri planlanmaktadır.
+- Simülasyon her zaman güncel graf üzerinde çalışır; snapshot üzerinde simülasyon yoktur.
+- Collector kayıt olur, heartbeat gönderir ve kuyruğu iletir; adaptörleri kendisi henüz çalıştırmaz.
+- Konsol girişi yerel hesaplarladır (AD ile giriş, MFA yoktur). Paketler kod imzalı değildir.
+- Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.
 
-## 6. License
-Proprietary software. Copyright © 2026 Berkay Atağ. All rights reserved. The source is published for reference; no licence to use, copy or redistribute it is granted.
+## Lisans
+
+Tescilli yazılım. © 2026 Berkay Atağ. Tüm hakları saklıdır. Kaynak kod inceleme amacıyla yayımlanmıştır; kullanma, kopyalama veya dağıtma lisansı verilmez.

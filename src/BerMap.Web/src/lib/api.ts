@@ -4,8 +4,10 @@ const BASE_URL = '/api';
 export const TOKEN_STORAGE_KEY = 'bermap-token';
 
 type UnauthorizedHandler = () => void;
+type ForbiddenHandler = (path: string) => void;
 
 let unauthorizedHandler: UnauthorizedHandler | null = null;
+let forbiddenHandler: ForbiddenHandler | null = null;
 
 /**
  * Registers the callback invoked when an authenticated request is rejected with 401.
@@ -13,6 +15,14 @@ let unauthorizedHandler: UnauthorizedHandler | null = null;
  */
 export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
   unauthorizedHandler = handler;
+}
+
+/**
+ * Registers the callback invoked when an authenticated request is rejected with 403.
+ * The auth store uses it to re-read the profile: the role may have changed on the server.
+ */
+export function setForbiddenHandler(handler: ForbiddenHandler | null): void {
+  forbiddenHandler = handler;
 }
 
 export function getStoredToken(): string | null {
@@ -57,6 +67,9 @@ async function handleResponse<T>(path: string, response: Response): Promise<T> {
   if (!response.ok) {
     if (response.status === 401 && !isLoginRequest(path)) {
       handleUnauthorized();
+    }
+    if (response.status === 403 && forbiddenHandler) {
+      forbiddenHandler(path);
     }
 
     const error: ApiError = {

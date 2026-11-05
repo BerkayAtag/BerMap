@@ -18,6 +18,21 @@ namespace BerMap.Infrastructure.Migrations
                 nullable: false,
                 defaultValue: false);
 
+            // Integrations that only ever received collector batches were fed
+            // by a collector all along; without this they would stay scheduled
+            // for server-side discovery after the upgrade.
+            migrationBuilder.Sql(
+                """
+                UPDATE "Integrations" AS i
+                SET "CollectorManaged" = TRUE
+                WHERE EXISTS (
+                        SELECT 1 FROM "DiscoveryJobs" AS j
+                        WHERE j."IntegrationId" = i."Id" AND j."JobType" = 'Collector')
+                  AND NOT EXISTS (
+                        SELECT 1 FROM "DiscoveryJobs" AS j
+                        WHERE j."IntegrationId" = i."Id" AND j."JobType" <> 'Collector');
+                """);
+
             migrationBuilder.AddColumn<DateTime>(
                 name: "StatusChangedAt",
                 table: "InfrastructureNodes",

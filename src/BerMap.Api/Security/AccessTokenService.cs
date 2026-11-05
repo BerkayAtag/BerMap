@@ -17,6 +17,9 @@ public sealed class AccessTokenService
 {
     public const string SigningKeyFileName = ".token-signing.key";
 
+    /// <summary>Claim carrying the user's security stamp at the time the token was issued.</summary>
+    public const string SecurityStampClaimType = "security_stamp";
+
     private readonly byte[] _signingKey;
     private readonly TimeSpan _lifetime;
 
@@ -40,7 +43,8 @@ public sealed class AccessTokenService
 
     public TimeSpan Lifetime => _lifetime;
 
-    public (string Token, DateTime ExpiresAt) Issue(Guid userId, string username, string displayName, string role)
+    public (string Token, DateTime ExpiresAt) Issue(Guid userId, string username, string displayName, string role,
+        string securityStamp)
     {
         var expiresAt = DateTime.UtcNow.Add(_lifetime);
         var payload = new TokenPayload(
@@ -48,7 +52,8 @@ public sealed class AccessTokenService
             username,
             displayName,
             role,
-            new DateTimeOffset(expiresAt).ToUnixTimeSeconds());
+            new DateTimeOffset(expiresAt).ToUnixTimeSeconds(),
+            securityStamp);
 
         var payloadSegment = Base64Url(JsonSerializer.SerializeToUtf8Bytes(payload));
         var signatureSegment = Base64Url(Sign(payloadSegment));
@@ -85,7 +90,10 @@ public sealed class AccessTokenService
             return null;
         }
 
-        if (payload == null || payload.Exp < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+        // Tokens issued before security stamps existed carry none and are no
+        // longer accepted: they could not be revoked.
+        if (payload == null || payload.Exp < DateTimeOffset.UtcNow.ToUnixTimeSeconds() ||
+            string.IsNullOrEmpty(payload.Stamp))
             return null;
 
         var identity = new ClaimsIdentity(new[]
@@ -93,7 +101,8 @@ public sealed class AccessTokenService
             new Claim(ClaimTypes.NameIdentifier, payload.Sub.ToString()),
             new Claim(ClaimTypes.Name, payload.Name),
             new Claim("display_name", payload.DisplayName),
-            new Claim(ClaimTypes.Role, payload.Role)
+            new Claim(ClaimTypes.Role, payload.Role),
+            new Claim(SecurityStampClaimType, payload.Stamp)
         }, authenticationScheme);
 
         return new ClaimsPrincipal(identity);
@@ -112,5 +121,5 @@ public sealed class AccessTokenService
         return Convert.FromBase64String(base64);
     }
 
-    private sealed record TokenPayload(Guid Sub, string Name, string DisplayName, string Role, long Exp);
+    private sealed record TokenPayload(Guid Sub, string Name, string DisplayName, string Role, long Exp, string? Stamp);
 }

@@ -32,7 +32,10 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "$VERSION" != "$PROPS" ]; then
             echo "Etiket $VERSION, Directory.Build.props $PROPS: sürümler aynı olmalı." >&2; exit 1
           fi
-          test -f "docs/releases/$VERSION.md" || { echo "docs/releases/$VERSION.md eksik" >&2; exit 1; }
+          # Sürüm notu yalnız yayınlanan (etiketli) sürümler için gerekir; release işi onu kullanır.
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            test -f "docs/releases/$VERSION.md" || { echo "docs/releases/$VERSION.md eksik" >&2; exit 1; }
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-dotnet@v4
         with:
@@ -44,7 +47,7 @@ jobs:
           cache-dependency-path: src/BerMap.Web/package-lock.json
       - name: Web konsolu
         working-directory: src/BerMap.Web
-        run: npm ci && npm run build
+        run: npm ci && npm test && npm run build
       - name: Sunucu paketleri
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -79,20 +82,53 @@ jobs:
       - name: Kur, giriş yap, yükselt, kaldır
         run: |
           set -euo pipefail
+          CONFIG=/etc/bermap/appsettings.Production.json
           sha256sum -c SHA256SUMS.txt
           tar xzf "bermap-server-$VERSION-linux-x64.tar.gz"
           cd "bermap-server-$VERSION-linux-x64"
           sudo BERMAP_DB_PASSWORD=release-test ./install.sh --db-host localhost --db-user bermap
+          test -f /opt/bermap/server/.bermap-server
+          test ! -e /opt/bermap/server/appsettings.Production.json   # yapılandırma program dizininde değil
+          systemctl show bermap-server -p Environment | grep -q "BERMAP_CONFIG_FILE=$CONFIG"
           PW=$(sudo sed -n 's/^password: //p' /var/lib/bermap/vault/initial-admin-password.txt)
           curl -fsS http://localhost:8080/ | grep -q '<div id="root">'
           curl -fsS http://localhost:8080/health | grep -q "\"version\":\"$VERSION"
           curl -fsS -X POST http://localhost:8080/api/auth/login -H 'content-type: application/json' \
             -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | grep -q '"token"'
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/dashboard/summary)" = 401
+          TOKEN=$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["BerMap"]["Collectors"]["EnrollmentToken"])' "$CONFIG")
+          # Elle eklenen ayar (KURULUM.md: ters vekil) yükseltmelerde korunmalı.
+          sudo python3 - "$CONFIG" <<'PY'
+          import json, sys
+          config = json.load(open(sys.argv[1]))
+          config["BerMap"]["ReverseProxy"] = {"KnownProxies": ["10.20.30.40"]}
+          json.dump(config, open(sys.argv[1], "w"), indent=2)
+          PY
           sudo ./install.sh   # yükseltme: yapılandırma korunur
           curl -fsS http://localhost:8080/healthz/ready
+          # Yalnız parola (döndürme) ve port: diğer değerler korunur.
+          sudo BERMAP_DB_PASSWORD=release-test ./install.sh --port 8081
+          curl -fsS http://localhost:8081/healthz/ready
+          curl -fsS -X POST http://localhost:8081/api/auth/login -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | grep -q '"token"'
+          sudo TOKEN="$TOKEN" python3 - "$CONFIG" <<'PY'
+          import json, os, sys
+          config = json.load(open(sys.argv[1]))
+          assert config["BerMap"]["ReverseProxy"]["KnownProxies"] == ["10.20.30.40"], config["BerMap"]
+          assert config["BerMap"]["Collectors"]["EnrollmentToken"] == os.environ["TOKEN"]
+          assert config["Kestrel"]["Endpoints"]["Default"]["Url"] == "http://0.0.0.0:8081", config["Kestrel"]
+          connection = config["ConnectionStrings"]["DefaultConnection"]
+          assert "Host=localhost" in connection and "Username=bermap" in connection, connection
+          PY
+          # Başka içerik barındıran bir dizin silinmemeli.
+          mkdir -p "$RUNNER_TEMP/not-bermap" && touch "$RUNNER_TEMP/not-bermap/keep"
+          if sudo ./install.sh --install-dir "$RUNNER_TEMP/not-bermap"; then echo "Yabancı dizine kurdu" >&2; exit 1; fi
+          test -f "$RUNNER_TEMP/not-bermap/keep"
+          curl -fsS http://localhost:8081/healthz/ready
           sudo ./uninstall.sh
-          ! systemctl is-active --quiet bermap-server
+          if systemctl is-active --quiet bermap-server; then echo "Servis hâlâ çalışıyor" >&2; exit 1; fi
+          test ! -e /opt/bermap/server
+          sudo test -f "$CONFIG"   # yeniden kurulum için korunur
 
   install-windows:
     needs: package
@@ -115,23 +151,44 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Expand-Archive "BerMap-Server-$env:VERSION-win-x64.zip" -DestinationPath pkg
           Set-Location "pkg\BerMap-Server-$env:VERSION-win-x64"
+          $config = "$env:ProgramData\BerMap\appsettings.Production.json"
+          $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\BerMapServer'
           # windows-latest ships PostgreSQL with user postgres / password root (PGUSER/PGPASSWORD).
           $dbUser = if ($env:PGUSER) { $env:PGUSER } else { 'postgres' }
           $pw = ConvertTo-SecureString $(if ($env:PGPASSWORD) { $env:PGPASSWORD } else { 'root' }) -AsPlainText -Force
           .\Install-BerMapServer.ps1 -DbHost localhost -DbUser $dbUser -DbPassword $pw -DbName bermap_release
+          if (-not (Test-Path $config)) { throw 'Configuration was not written to the data directory.' }
+          if (Test-Path "$env:ProgramFiles\BerMap\Server\appsettings.Production.json") { throw 'Configuration is in the program directory.' }
+          if ((Get-ItemProperty $serviceKey).Environment -notcontains "BERMAP_CONFIG_FILE=$config") { throw 'BERMAP_CONFIG_FILE is not set on the service.' }
           $admin = (Get-Content "$env:ProgramData\BerMap\vault\initial-admin-password.txt" | Where-Object { $_ -like 'password:*' }) -replace '^password: ', ''
           $index = Invoke-WebRequest http://localhost:8080/ -UseBasicParsing
           if ($index.Content -notmatch '<div id="root">') { throw 'Console was not served.' }
           $health = Invoke-RestMethod http://localhost:8080/health
           if (-not $health.version.StartsWith($env:VERSION)) { throw "Unexpected version $($health.version)" }
-          $login = Invoke-RestMethod http://localhost:8080/api/auth/login -Method Post -ContentType 'application/json' `
-            -Body (@{ username = 'admin'; password = $admin } | ConvertTo-Json)
+          $body = @{ username = 'admin'; password = $admin } | ConvertTo-Json
+          $login = Invoke-RestMethod http://localhost:8080/api/auth/login -Method Post -ContentType 'application/json' -Body $body
           if (-not $login.token) { throw 'Login failed.' }
           if ((Get-Service BerMapServer).StartType -ne 'Automatic') { throw 'Service is not automatic.' }
+          $before = Get-Content $config -Raw | ConvertFrom-Json
+          # A setting added by hand (KURULUM.md: reverse proxy) must survive upgrades.
+          $before.BerMap | Add-Member -NotePropertyName ReverseProxy -NotePropertyValue ([pscustomobject]@{ KnownProxies = @('10.20.30.40') })
+          $before | ConvertTo-Json -Depth 20 | Set-Content $config -Encoding UTF8
           .\Install-BerMapServer.ps1   # yükseltme: yapılandırma korunur
           Invoke-RestMethod http://localhost:8080/healthz/ready | Out-Null
+          .\Install-BerMapServer.ps1 -Port 8081   # yalnız port değişir
+          Invoke-RestMethod http://localhost:8081/healthz/ready | Out-Null
+          $login = Invoke-RestMethod http://localhost:8081/api/auth/login -Method Post -ContentType 'application/json' -Body $body
+          if (-not $login.token) { throw 'Login failed after the upgrade.' }
+          $after = Get-Content $config -Raw | ConvertFrom-Json
+          if (@($after.BerMap.ReverseProxy.KnownProxies) -notcontains '10.20.30.40') { throw 'BerMap:ReverseProxy was dropped by the upgrade.' }
+          if ($after.BerMap.Collectors.EnrollmentToken -ne $before.BerMap.Collectors.EnrollmentToken) { throw 'Enrollment token changed.' }
+          if ($after.ConnectionStrings.DefaultConnection -ne $before.ConnectionStrings.DefaultConnection) { throw 'Connection string changed.' }
+          if ($after.Kestrel.Endpoints.Default.Url -ne 'http://0.0.0.0:8081') { throw "Unexpected URL $($after.Kestrel.Endpoints.Default.Url)" }
+          if (Get-NetFirewallRule -DisplayName 'BerMap Server (8080)' -ErrorAction SilentlyContinue) { throw 'Old firewall rule was kept.' }
           .\Uninstall-BerMapServer.ps1
           if (Get-Service BerMapServer -ErrorAction SilentlyContinue) { throw 'Service was not removed.' }
+          if (Test-Path "$env:ProgramFiles\BerMap\Server") { throw 'Program directory was not removed.' }
+          if (-not (Test-Path $config)) { throw 'Configuration was not kept for a reinstall.' }
 
   release:
     if: github.ref_type == 'tag'

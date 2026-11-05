@@ -7,6 +7,7 @@ import { useLocale } from '@/lib/i18n';
 import { useAuthStore } from '@/stores/authStore';
 import { DialogShell, MessageBanner } from '@/components/users/DialogShell';
 import { PASSWORD_MIN_LENGTH, userErrorMessage, validatePassword } from '@/components/users/userText';
+import type { ChangePasswordResponse } from '@/types';
 
 interface ChangePasswordDialogProps {
   open: boolean;
@@ -51,7 +52,13 @@ const ChangePasswordForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     setSaving(true);
     setError(null);
     try {
-      await api.post<void>('/auth/change-password', { currentPassword, newPassword });
+      // The change ends every other session; the response carries a new token for
+      // this one. An older server answers 204 and the next request signs out.
+      const result = await api.post<ChangePasswordResponse | undefined>('/auth/change-password', {
+        currentPassword,
+        newPassword,
+      });
+      if (result?.token) useAuthStore.getState().setToken(result.token);
       setDone(true);
       setCurrentPassword('');
       setNewPassword('');
@@ -95,8 +102,8 @@ const ChangePasswordForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           <span className="flex items-start gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             {isTr
-              ? 'Parolanız değiştirildi. Bir sonraki girişte yeni parolanızı kullanın.'
-              : 'Your password was changed. Use the new password the next time you sign in.'}
+              ? 'Parolanız değiştirildi; diğer oturumlarınız kapatıldı. Bir sonraki girişte yeni parolanızı kullanın.'
+              : 'Your password was changed and your other sessions were signed out. Use the new password the next time you sign in.'}
           </span>
         </MessageBanner>
       ) : (

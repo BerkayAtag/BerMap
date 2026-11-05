@@ -74,6 +74,7 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         var externalToNodeId = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var createdNodes = new List<InfrastructureNode>();
         var createdNodeIds = new HashSet<Guid>();
+        var unchangedNodeIds = new HashSet<Guid>();
 
         var pendingReviews = await _context.ReconciliationReviews
             .Where(r => r.IntegrationId == integrationId && r.Status == ReconciliationReviewStatus.Pending)
@@ -130,6 +131,7 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             else
             {
                 result.NodesUnchanged++;
+                unchangedNodeIds.Add(node.Id);
             }
 
             node.LastSeen = now;
@@ -169,7 +171,7 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             }
 
             seenLinkIds.Add(existingLink.Id);
-            existingLink.PropertiesJson = JsonSerializer.Serialize(discovered.Properties);
+            existingLink.PropertiesJson = NodeStatusRules.LinkProperties(discovered.Properties, discovered.Status);
             externalToNodeId[externalId] = node.Id;
 
             if (decision.RequiresReview && decision.Candidates.Count > 0)
@@ -304,6 +306,7 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         // A partial view proves nothing about absent objects, so skip it then.
         // "Seen" is job-wide: a link refreshed by an earlier batch of the same
         // collector job is not stale just because the final batch omitted it.
+        var statusNodeIds = new HashSet<Guid>(externalToNodeId.Values);
         foreach (var link in links.Where(l =>
                      isCompleteSnapshot && !seenLinkIds.Contains(l.Id) && l.LastSeenJobId != jobId))
         {
@@ -312,6 +315,8 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
                 link.IsStale = true;
                 link.UpdatedAt = now;
                 result.SourceLinksStale++;
+                // The status this source reported no longer counts for its node.
+                statusNodeIds.Add(link.NodeId);
             }
         }
 
@@ -358,6 +363,8 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             result.RelationshipsMarkedStale++;
         }
 
+        await ApplyEffectiveStatusAsync(statusNodeIds, links, createdNodeIds, unchangedNodeIds, result, now, cancellationToken);
+
         integration.LastSyncAt = now;
         integration.DiscoveredEntitiesCount = links.Count(l => !l.IsStale);
         integration.UpdatedAt = now;
@@ -369,6 +376,73 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             jobId, result.NodesCreated, result.NodesUpdated, result.RelationshipsCreated, result.ReviewsCreated);
 
         return result;
+    }
+
+    /// <summary>
+    /// Sets each node's status to the worst status its live sources reported
+    /// (see <see cref="NodeStatusRules"/>). Only a change of that effective
+    /// status is stamped in StatusChangedAt, and never on a node created by
+    /// this run: its first status is not a transition.
+    /// </summary>
+    private async Task ApplyEffectiveStatusAsync(
+        IReadOnlyCollection<Guid> nodeIds,
+        IReadOnlyCollection<NodeSourceLink> integrationLinks,
+        IReadOnlySet<Guid> createdNodeIds,
+        ISet<Guid> unchangedNodeIds,
+        IngestionResult result,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        if (nodeIds.Count == 0)
+            return;
+
+        // Links added by this run are not in the database yet; this
+        // integration's links are already tracked, so the query returns them as
+        // modified in memory.
+        var ids = nodeIds.ToList();
+        var persistedLinks = await _context.NodeSourceLinks
+            .Where(l => ids.Contains(l.NodeId))
+            .ToListAsync(cancellationToken);
+        var reportedByNode = persistedLinks
+            .Concat(integrationLinks)
+            .DistinctBy(l => l.Id)
+            .Where(l => !l.IsStale && nodeIds.Contains(l.NodeId))
+            .GroupBy(l => l.NodeId)
+            .ToDictionary(g => g.Key, g => NodeStatusRules.Effective(g.Select(l => NodeStatusRules.Reported(l.PropertiesJson))));
+
+        var nodes = _context.InfrastructureNodes.Local
+            .Where(n => reportedByNode.ContainsKey(n.Id))
+            .ToDictionary(n => n.Id);
+        var missing = reportedByNode.Keys.Where(id => !nodes.ContainsKey(id)).ToList();
+        if (missing.Count > 0)
+        {
+            foreach (var node in await _context.InfrastructureNodes
+                         .Where(n => missing.Contains(n.Id))
+                         .ToListAsync(cancellationToken))
+            {
+                nodes[node.Id] = node;
+            }
+        }
+
+        foreach (var (nodeId, effective) in reportedByNode)
+        {
+            if (effective == null || !nodes.TryGetValue(nodeId, out var node) ||
+                string.Equals(node.Status, effective, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            node.Status = effective;
+            node.UpdatedAt = now;
+            if (!createdNodeIds.Contains(nodeId))
+                node.StatusChangedAt = now;
+
+            if (unchangedNodeIds.Remove(nodeId))
+            {
+                result.NodesUnchanged--;
+                result.NodesUpdated++;
+            }
+        }
     }
 
     private async Task<List<InfrastructureNode>> LoadCandidatesAsync(

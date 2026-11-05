@@ -26,6 +26,10 @@ namespace BerMap.Api.Controllers;
 [Authorize(Policy = AuthorizationPolicies.ManageUsers)]
 public class UsersController : ControllerBase
 {
+    // pg_advisory_xact_lock key that serialises account updates, so two
+    // concurrent changes cannot both pass the last-administrator check.
+    private const long AccountUpdateLockKey = 0x4265724D61705553; // "BerMapUS"
+
     private readonly BerMapDbContext _context;
     private readonly IAuditService _auditService;
     private readonly IMemoryCache _cache;
@@ -92,10 +96,6 @@ public class UsersController : ControllerBase
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<UserDto>> Update(Guid id, [FromBody] UpdateUserRequest request, CancellationToken cancellationToken)
     {
-        var user = await LoadUsers(tracking: true).FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
-        if (user == null)
-            return NotFound();
-
         UserRole? newRole = null;
         if (request.Role != null)
         {
@@ -103,6 +103,19 @@ public class UsersController : ControllerBase
                 return Problem400("invalid_role", "Geçersiz rol.");
             newRole = parsed;
         }
+
+        // The last-administrator check and the save run under one lock, so
+        // the user and the other administrators are read after any concurrent
+        // update has committed. Leaving early rolls back and releases the lock.
+        await using var transaction = _context.Database.IsRelational()
+            ? await _context.Database.BeginTransactionAsync(cancellationToken)
+            : null;
+        if (_context.Database.IsNpgsql())
+            await _context.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({AccountUpdateLockKey})", cancellationToken);
+
+        var user = await LoadUsers(tracking: true).FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+        if (user == null)
+            return NotFound();
 
         var losesAdmin = IsAdmin(user) && user.IsActive &&
                          (request.IsActive == false || (newRole.HasValue && newRole != UserRole.PlatformAdministrator));
@@ -116,18 +129,29 @@ public class UsersController : ControllerBase
             user.DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? user.Username : request.DisplayName.Trim();
         if (request.Email != null)
             user.Email = request.Email.Trim();
-        if (request.IsActive.HasValue)
+        // Disabling the account or changing its role revokes the user's tokens.
+        if (request.IsActive == false && user.IsActive)
+        {
+            user.IsActive = false;
+            user.RotateSecurityStamp();
+        }
+        else if (request.IsActive.HasValue)
+        {
             user.IsActive = request.IsActive.Value;
+        }
         if (newRole.HasValue && PrimaryRole(user) != newRole.Value)
         {
             var role = await _context.Roles.FirstAsync(r => r.RoleType == newRole.Value, cancellationToken);
             user.Roles.Clear();
             user.Roles.Add(new UserRoleAssignment { UserId = user.Id, RoleId = role.Id });
+            user.RotateSecurityStamp();
         }
         user.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync(cancellationToken);
+        if (transaction != null)
+            await transaction.CommitAsync(cancellationToken);
 
-        // Role and active flag take effect on the user's next request, not when their token expires.
+        // Role, active flag and stamp take effect on the user's next request, not when their token expires.
         BearerTokenAuthenticationHandler.InvalidateUserState(_cache, user.Id);
         await AuditAsync("User.Updated", user, new { request.DisplayName, request.Email, request.Role, request.IsActive }, cancellationToken);
 
@@ -145,9 +169,12 @@ public class UsersController : ControllerBase
         if (PasswordPolicy.Validate(request.Password, user.Username) is { } passwordError)
             return Problem400("weak_password", passwordError);
 
+        // A reset usually follows a suspected compromise: revoke every token issued for the account.
         user.PasswordHash = PasswordHasher.Hash(request.Password);
+        user.RotateSecurityStamp();
         user.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync(cancellationToken);
+        BearerTokenAuthenticationHandler.InvalidateUserState(_cache, user.Id);
 
         await AuditAsync("User.PasswordReset", user, new { user.Username }, cancellationToken);
         return NoContent();

@@ -21,6 +21,7 @@ import {
   validateCron,
   validateServer,
 } from '@/components/integrations/integrationText';
+import { createConfiguration, updateConfiguration } from '@/components/integrations/wizardConfiguration';
 import type {
   AdapterDescriptor,
   ApiError,
@@ -155,43 +156,6 @@ function formFromIntegration(integration: Integration): FormState {
     timeoutSeconds: integration.timeoutSeconds || initialState.timeoutSeconds,
     isEnabled: integration.isEnabled,
     collectorManaged: integration.collectorManaged === true,
-  };
-}
-
-function buildConfiguration(form: FormState): Record<string, unknown> {
-  if (form.adapterType === 'ActiveDirectory') {
-    return {
-      server: form.server.trim(),
-      port: form.port,
-      useSsl: form.useSsl,
-      useStartTls: form.useStartTls,
-      username: form.username.trim(),
-      baseDn: form.baseDn.trim() || null,
-      allowUntrustedCertificate: form.allowUntrustedCertificate,
-      allowPlaintext: form.allowPlaintext,
-      discoverAllDomains: form.discoverAllDomains,
-      includeGroups: true,
-      includeComputers: true,
-      includeOus: true,
-      includeSites: true,
-      includeTrusts: true,
-      pageSize: 500,
-      timeoutSeconds: 30,
-    };
-  }
-
-  return {
-    server: form.server.trim(),
-    port: form.port,
-    username: form.username.trim(),
-    allowUntrustedCertificate: form.allowUntrustedCertificate,
-    ignoreSslErrors: false,
-    collectMetrics: form.collectMetrics,
-    useSoapMetrics: true,
-    includePoweredOffVms: form.includePoweredOffVms,
-    timeoutSeconds: 30,
-    maxConcurrency: 8,
-    retryCount: 3,
   };
 }
 
@@ -387,6 +351,13 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     }
   };
 
+  // Editing writes only the changed fields over the saved configuration, so tuning
+  // keys set through the API (timeouts, concurrency, page size) survive any edit.
+  const draftConfiguration = () =>
+    integration
+      ? updateConfiguration(integration.configuration, formFromIntegration(integration), form)
+      : createConfiguration(form);
+
   const canTestDraft = !collectorManaged && (!isEdit || form.secret.trim() !== '');
 
   const handleTestConnection = async () => {
@@ -399,7 +370,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     try {
       const result = await api.post<ConnectionTestResult>('/integrations/test-connection', {
         adapterType: form.adapterType,
-        configuration: buildConfiguration(form),
+        configuration: draftConfiguration(),
         secret: form.secret,
         timeoutSeconds: 30,
       });
@@ -431,8 +402,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
         const payload: UpdateIntegrationRequest = {
           name: form.name.trim(),
           description: form.description.trim(),
-          // Keep keys the wizard does not edit (tuning values set through the API).
-          configuration: { ...(integration.configuration ?? {}), ...buildConfiguration(form) },
+          configuration: draftConfiguration(),
           scheduleCron: form.scheduleCron.trim(),
           timeoutSeconds: form.timeoutSeconds,
           isEnabled: form.isEnabled,
@@ -456,7 +426,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
         name: form.name.trim(),
         description: form.description.trim(),
         adapterType: form.adapterType,
-        configuration: buildConfiguration(form),
+        configuration: draftConfiguration(),
         scheduleCron: form.scheduleCron.trim() || '0 */6 * * *',
         timeoutSeconds: form.timeoutSeconds,
         isEnabled: form.isEnabled,

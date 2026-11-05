@@ -256,8 +256,9 @@ public sealed class DiscoveryJobRunner : IDiscoveryJobRunner
             job.DurationMs = (long)stopwatch.Elapsed.TotalMilliseconds;
             job.CurrentPhase = "Cancelled";
             job.CurrentMessage = "Discovery was cancelled.";
-            // A cancelled run proves nothing; the previous health stays.
-            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
+            // A cancelled run proves nothing; the previous health stays (a
+            // partial run stays Degraded, it does not become an Error).
+            integration.Status = await IntegrationHealth.RestingStatusAsync(context, integration, CancellationToken.None);
             integration.UpdatedAt = DateTime.UtcNow;
             await context.SaveChangesAsync(CancellationToken.None);
 

@@ -475,7 +475,7 @@ public class EntityReconciliationService : IEntityReconciliationService
             IPAddress = discovered.IPAddress,
             MacAddress = discovered.MacAddress,
             NodeType = ParseNodeType(discovered.NodeType),
-            Status = NormalizeStatus(discovered.Status),
+            Status = NodeStatusRules.Normalize(discovered.Status),
             DiscoverySource = ResolveSourceName(discovered),
             BiosUuid = discovered.BiosUuid,
             VmInstanceUuid = discovered.VmInstanceUuid,
@@ -526,17 +526,10 @@ public class EntityReconciliationService : IEntityReconciliationService
         if (ShouldUpgradeNodeType(existing.NodeType, discoveredType))
             existing.NodeType = discoveredType;
 
-        if (!string.IsNullOrWhiteSpace(discovered.Status))
-        {
-            // Only a real transition counts as a status change. A new node is
-            // created with its first status, so it stays without StatusChangedAt.
-            var status = NormalizeStatus(discovered.Status);
-            if (!string.Equals(existing.Status, status, StringComparison.Ordinal))
-            {
-                existing.Status = status;
-                existing.StatusChangedAt = DateTime.UtcNow;
-            }
-        }
+        // The status of an existing node is not merged here: a node reported
+        // by several sources shows the worst status across them, which only
+        // ingestion can derive (from the status kept on each source link, see
+        // NodeStatusRules). A new node starts with its first source's status.
 
         var sourceName = ResolveSourceName(discovered);
         if (!string.IsNullOrWhiteSpace(sourceName) &&
@@ -761,17 +754,6 @@ public class EntityReconciliationService : IEntityReconciliationService
             : "Collector";
     }
 
-    private static string NormalizeStatus(string? status)
-    {
-        return status?.Trim().ToLowerInvariant() switch
-        {
-            "healthy" or "ok" or "online" or "poweredon" or "powered_on" => "healthy",
-            "warning" or "degraded" or "suspended" => "warning",
-            "critical" or "error" or "offline" or "poweredoff" or "powered_off" => "critical",
-            _ => "unknown"
-        };
-    }
-
     private static string ShortName(DiscoveredNodeContract discovered)
     {
         var candidate = !string.IsNullOrWhiteSpace(discovered.Name)
@@ -835,4 +817,78 @@ public class EntityReconciliationService : IEntityReconciliationService
         var chars = value.Where(Uri.IsHexDigit).Select(char.ToLowerInvariant).ToArray();
         return chars.Length == 12 ? new string(chars) : value.Trim().ToLowerInvariant();
     }
+}
+
+/// <summary>
+/// Status of a node that several sources report. Each source link keeps the
+/// status its source last reported (<see cref="ReportedStatusKey"/> in the
+/// link's properties) and the node shows the worst of them across its live
+/// links. Two sources that disagree (vCenter "warning", AD "healthy") then no
+/// longer flip the node on every run, and StatusChangedAt marks only a change
+/// of that effective status.
+/// </summary>
+public static class NodeStatusRules
+{
+    public const string ReportedStatusKey = "_status";
+
+    public static string Normalize(string? status)
+    {
+        return status?.Trim().ToLowerInvariant() switch
+        {
+            "healthy" or "ok" or "online" or "poweredon" or "powered_on" => "healthy",
+            "warning" or "degraded" or "suspended" => "warning",
+            "critical" or "error" or "offline" or "poweredoff" or "powered_off" => "critical",
+            _ => "unknown"
+        };
+    }
+
+    /// <summary>
+    /// The worst reported status, or null when no source reported one.
+    /// "unknown" carries no information, so it only wins when nothing else was reported.
+    /// </summary>
+    public static string? Effective(IEnumerable<string?> reportedStatuses) => reportedStatuses
+        .Where(s => !string.IsNullOrWhiteSpace(s))
+        .Select(Normalize)
+        .OrderByDescending(Severity)
+        .FirstOrDefault();
+
+    /// <summary>The link properties to persist: the source's properties plus its normalised status.</summary>
+    public static string LinkProperties(IReadOnlyDictionary<string, string> properties, string? reportedStatus)
+    {
+        var copy = new Dictionary<string, string>(properties);
+        if (string.IsNullOrWhiteSpace(reportedStatus))
+            copy.Remove(ReportedStatusKey);
+        else
+            copy[ReportedStatusKey] = Normalize(reportedStatus);
+        return JsonSerializer.Serialize(copy);
+    }
+
+    /// <summary>The status a source link recorded, or null for links written before it was kept.</summary>
+    public static string? Reported(string? linkPropertiesJson)
+    {
+        if (string.IsNullOrWhiteSpace(linkPropertiesJson))
+            return null;
+
+        try
+        {
+            return JsonNode.Parse(linkPropertiesJson) is JsonObject props &&
+                   props[ReportedStatusKey] is JsonValue value &&
+                   value.TryGetValue<string>(out var status) &&
+                   !string.IsNullOrWhiteSpace(status)
+                ? status
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static int Severity(string status) => status switch
+    {
+        "critical" => 3,
+        "warning" => 2,
+        "healthy" => 1,
+        _ => 0
+    };
 }

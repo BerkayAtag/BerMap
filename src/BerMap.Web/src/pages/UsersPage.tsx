@@ -48,6 +48,7 @@ export const UsersPage: React.FC = () => {
   const t = useT();
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((state) => state.user);
+  const refreshProfile = useAuthStore((state) => state.refreshProfile);
   const isAdmin = currentUser?.role === ROLES.PlatformAdministrator;
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,9 +105,11 @@ export const UsersPage: React.FC = () => {
           isSelf={dialog.user.id === currentUser?.id}
           roleLabel={roleLabel}
           onClose={() => setDialog(null)}
-          onSaved={(user) =>
-            handleSaved(isTr ? `${user.username} güncellendi.` : `${user.username} was updated.`)
-          }
+          onSaved={(user) => {
+            // Editing yourself (role, name) changes what the console may show.
+            if (user.id === currentUser?.id) void refreshProfile();
+            handleSaved(isTr ? `${user.username} güncellendi.` : `${user.username} was updated.`);
+          }}
         />
       )}
       {dialog?.kind === 'reset' && (

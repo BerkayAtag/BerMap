@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
 using BerMap.Domain.Entities;
+using BerMap.Domain.Enums;
 using BerMap.Infrastructure.Data;
 
 namespace BerMap.Infrastructure.Repositories;
@@ -16,10 +17,15 @@ namespace BerMap.Infrastructure.Repositories;
 /// Reads the persisted infrastructure graph. An empty database returns an empty
 /// graph; this repository never synthesizes demo topology.
 /// </summary>
-public class GraphRepository : IGraphService
+public class GraphRepository : IGraphService, IImpactGraphSource
 {
     private const int MaxTopologyNodes = 500;
     private const int MaxTopologyRelationships = 2000;
+
+    // The impact graph is evaluated on the server, not drawn, so it may be
+    // larger; it stays small anyway because containment is not walked.
+    private const int MaxImpactNodes = 5000;
+    private const int MaxImpactRelationships = 20000;
 
     private readonly BerMapDbContext _context;
 
@@ -152,6 +158,125 @@ public class GraphRepository : IGraphService
         result.Relationships = initialRelationships.Select(MapRelationshipDto).ToList();
         return result;
     }
+
+    /// <summary>
+    /// The simulation's neighbourhood of the target: a breadth-first walk over
+    /// live (non-stale) edges that skips organisational ones (Contains,
+    /// MemberOf, ManagedBy, Trusts, PossibleDuplicate). The only membership
+    /// edges read are those that place the target, or a host it runs on, in a
+    /// container (host -MemberOf-> cluster, cluster -Contains-> host); they are
+    /// not expanded further, so a datacenter never pulls in its whole inventory.
+    /// </summary>
+    public async Task<GraphQueryResultDto> GetImpactGraphAsync(
+        Guid targetNodeId,
+        int depth,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new GraphQueryResultDto();
+        depth = Math.Clamp(depth, 1, 5);
+
+        var target = await _context.InfrastructureNodes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(n => n.Id == targetNodeId, cancellationToken);
+        if (target == null)
+            return result;
+
+        var visited = new HashSet<Guid> { target.Id };
+        var frontier = new HashSet<Guid> { target.Id };
+        var relationshipIds = new HashSet<Guid>();
+        var membershipAnchors = new HashSet<Guid> { target.Id };
+
+        for (var level = 0; level < depth && frontier.Count > 0; level++)
+        {
+            var relationships = await ImpactEdges(_context.InfrastructureRelationships.AsNoTracking())
+                .Where(r => frontier.Contains(r.SourceNodeId) || frontier.Contains(r.TargetNodeId))
+                .OrderBy(r => r.Id)
+                .Select(r => new { r.Id, r.SourceNodeId, r.TargetNodeId, r.RelationshipType })
+                .Take(MaxImpactRelationships + 1)
+                .ToListAsync(cancellationToken);
+            if (relationships.Count > MaxImpactRelationships)
+            {
+                relationships.RemoveAt(relationships.Count - 1);
+                result.IsTruncated = true;
+            }
+
+            var next = new HashSet<Guid>();
+            foreach (var rel in relationships)
+            {
+                relationshipIds.Add(rel.Id);
+                if (level == 0 && rel.SourceNodeId == target.Id && rel.RelationshipType == RelationshipType.HostedOn)
+                    membershipAnchors.Add(rel.TargetNodeId);
+                if (visited.Add(rel.SourceNodeId))
+                    next.Add(rel.SourceNodeId);
+                if (visited.Add(rel.TargetNodeId))
+                    next.Add(rel.TargetNodeId);
+            }
+
+            if (visited.Count >= MaxImpactNodes)
+                break;
+
+            frontier = next;
+        }
+
+        var anchors = membershipAnchors.ToList();
+        var membership = await _context.InfrastructureRelationships
+            .AsNoTracking()
+            .Where(r => !r.IsStale &&
+                        ((r.RelationshipType == RelationshipType.MemberOf && anchors.Contains(r.SourceNodeId)) ||
+                         (r.RelationshipType == RelationshipType.Contains && anchors.Contains(r.TargetNodeId))))
+            .OrderBy(r => r.Id)
+            .Select(r => new { r.Id, r.SourceNodeId, r.TargetNodeId })
+            .Take(MaxImpactRelationships)
+            .ToListAsync(cancellationToken);
+        foreach (var rel in membership)
+        {
+            relationshipIds.Add(rel.Id);
+            visited.Add(rel.SourceNodeId);
+            visited.Add(rel.TargetNodeId);
+        }
+
+        var nodes = await _context.InfrastructureNodes
+            .AsNoTracking()
+            .Where(n => visited.Contains(n.Id) && n.Id != target.Id)
+            .OrderBy(n => n.NodeType)
+            .ThenBy(n => n.Name)
+            .Take(MaxImpactNodes - 1)
+            .ToListAsync(cancellationToken);
+        nodes.Insert(0, target);
+        result.IsTruncated |= visited.Count > nodes.Count;
+
+        var nodeIds = nodes.Select(n => n.Id).ToHashSet();
+        var relationshipsForNodes = await _context.InfrastructureRelationships
+            .AsNoTracking()
+            .Include(r => r.SourceNode)
+            .Include(r => r.TargetNode)
+            .Where(r => relationshipIds.Contains(r.Id))
+            .OrderBy(r => r.Id)
+            .Take(MaxImpactRelationships + 1)
+            .ToListAsync(cancellationToken);
+        if (relationshipsForNodes.Count > MaxImpactRelationships)
+        {
+            relationshipsForNodes.RemoveAt(relationshipsForNodes.Count - 1);
+            result.IsTruncated = true;
+        }
+
+        result.Nodes = await MapNodesAsync(nodes, cancellationToken);
+        result.Relationships = relationshipsForNodes
+            .Where(r => nodeIds.Contains(r.SourceNodeId) && nodeIds.Contains(r.TargetNodeId))
+            .Select(MapRelationshipDto)
+            .ToList();
+
+        return result;
+    }
+
+    /// <summary>Live edges an impact can travel along (the complement of the organisational ones).</summary>
+    private static IQueryable<InfrastructureRelationship> ImpactEdges(IQueryable<InfrastructureRelationship> relationships) =>
+        relationships.Where(r => !r.IsStale &&
+                                 r.RelationshipType != RelationshipType.Contains &&
+                                 r.RelationshipType != RelationshipType.MemberOf &&
+                                 r.RelationshipType != RelationshipType.ManagedBy &&
+                                 r.RelationshipType != RelationshipType.Trusts &&
+                                 r.RelationshipType != RelationshipType.PossibleDuplicate);
 
     public async Task<List<InfrastructureNodeDto>> SearchNodesAsync(string query, CancellationToken cancellationToken = default)
     {

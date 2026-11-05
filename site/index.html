@@ -41,11 +41,11 @@
 <main id="main">
   <section class="hero">
     <div class="hero-copy">
-      <p class="eyebrow">Sürüm 0.2 · Önizleme · <span lang="en">Windows Server</span> ve <span lang="en">Linux</span></p>
+      <p class="eyebrow">Sürüm 0.3 · <span lang="en">Windows Server</span> ve <span lang="en">Linux</span></p>
       <h1>Altyapınızı haritalayın.<br><em>Değişikliği önce simülasyonda deneyin.</em></h1>
       <p class="lead">BerMap, Active Directory ve vCenter'ı salt okunur keşfeder, sunucuları, sanal makineleri ve bağımlılıkları tek bir grafta uzlaştırır. Bir host çökerse neyin etkileneceğini üretime dokunmadan görürsünüz.</p>
       <div class="actions">
-        <a class="button" href="https://github.com/BerkayAtag/BerMap">Kaynak koda git <span aria-hidden="true">↗</span></a>
+        <a class="button" href="https://github.com/BerkayAtag/BerMap/releases/latest">Sunucu paketini indir <span aria-hidden="true">↓</span></a>
         <a class="link" href="https://github.com/BerkayAtag/BerMap#readme">Belgeleri incele →</a>
       </div>
       <ul class="facts">
@@ -73,8 +73,8 @@
       <article><span class="num">01 / Keşif</span><h3>Salt okunur adaptörler</h3><p>Active Directory (LDAPS, sayfalı arama) ve vCenter (REST + PropertyCollector) cron takvimine göre okunur; kaynak sistemlere hiçbir yazma işlemi yapılmaz. Kimlik bilgileri AES-GCM ile şifreli kasada saklanır.</p></article>
       <article><span class="num">02 / Uzlaştırma</span><h3>Tek varlık, çok kaynak</h3><p>Bir sunucu AD'de bilgisayar, vCenter'da sanal makine olarak görünür. SID, BIOS UUID ve FQDN ile tek düğümde birleşir; yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.</p></article>
       <article><span class="num">03 / Harita</span><h3>Bağımlılık grafı</h3><p>Datacenter, cluster, host, VM, datastore, ağ ve uygulama ilişkileri etkileşimli haritada. Eski (stale) kayıtlar silinmez, geçmiş bağlam için işaretlenir.</p></article>
-      <article><span class="num">04 / Etki</span><h3>Patlama yarıçapı</h3><p>Bir düğüm seçin; ona bağlı uygulamaları, veritabanlarını ve servisleri derinlik ve güven düzeyiyle görün. Değişiklik toplantısına kanıtla gelin.</p></article>
-      <article><span class="num">05 / BerSim</span><h3>Değişiklik simülasyonu</h3><p>Host arızası, datastore kaybı ve ağ bölünmesi senaryoları deterministik motorla hesaplanır; cluster'da failover için CPU ve bellek payı kalıyor mu, risk puanı ne, görürsünüz.</p></article>
+      <article><span class="num">04 / BerSim</span><h3>Değişiklik simülasyonu</h3><p>Host, datastore, ağ ya da iş yükü kesintisinin etkilerini bağımlılık yollarıyla görün. Host arızasında cluster'ın N-1 CPU ve bellek payı hesaplanır; sonuç yazdırılabilir risk raporu olur.</p></article>
+      <article><span class="num">05 / Erişim</span><h3>Kullanıcılar ve roller</h3><p>Yerel hesaplar ve beş rol: yönetici, entegrasyon yöneticisi, operatör, güvenlik denetçisi, salt okunur. Parola değiştirme ve sıfırlama; devre dışı hesap anında erişimini kaybeder.</p></article>
       <article><span class="num">06 / Denetim</span><h3>Snapshot ve iz kaydı</h3><p>Grafın değişmez, hash'li anlık görüntülerini alın ve karşılaştırın. Giriş, entegrasyon ve keşif işlemlerinin her biri kullanıcı adıyla denetim kaydı bırakır.</p></article>
     </div>
   </section>
@@ -99,8 +99,8 @@
         <figcaption>Simülasyon Stüdyosu · host arızası senaryosu</figcaption>
       </figure>
       <figure>
-        <img src="assets/impact.png" data-light-src="assets/impact.png" data-dark-src="assets/impact-dark.png" alt="BerMap etki analizi: seçilen veritabanına bağımlı uygulamalar" width="1440" height="900" loading="lazy">
-        <figcaption>Etki Analizi · bağımlı uygulamalar ve servisler</figcaption>
+        <img src="assets/users.png" data-light-src="assets/users.png" data-dark-src="assets/users-dark.png" alt="BerMap kullanıcı yönetimi: hesaplar, roller ve durum" width="1440" height="900" loading="lazy">
+        <figcaption>Kullanıcılar · yerel hesaplar ve roller</figcaption>
       </figure>
     </div>
   </section>
@@ -122,14 +122,14 @@
 
   <section class="section" id="kurulum">
     <div class="section-head">
-      <p class="eyebrow">Kaynaktan kurulum</p>
-      <h2>Üç bileşen.<br><em>Şema ilk açılışta kurulur.</em></h2>
+      <p class="eyebrow">İndirme ve kurulum</p>
+      <h2>Paketi açın, betiği çalıştırın.<br><em>Gerisini kurulum hazırlar.</em></h2>
     </div>
     <div class="install">
       <ol class="steps">
-        <li><b>Hazırlayın</b><span>.NET 10 SDK, Node.js 20+ ve PostgreSQL 16+ kurun; BerMap için bir veritabanı ve kullanıcı oluşturun.</span></li>
-        <li><b>Yapılandırın</b><span>appsettings dosyasında bağlantı dizesini, kasa dizinini ve collector kayıt token'ını ayarlayın. İsterseniz ilk yönetici parolasını da verin.</span></li>
-        <li><b>Çalıştırın</b><span>API ilk açılışta migration'ları uygular, rolleri ve <code>admin</code> hesabını oluşturur. Parola verilmediyse üretilen parola kasa dizinindeki dosyaya yazılır.</span></li>
+        <li><b>İndirin</b><span>Windows Server için <code>BerMap-Server-…-win-x64.zip</code>, Linux için <code>bermap-server-…-linux-x64.tar.gz</code>. Paket self-contained'dir; sunucuda .NET gerekmez. Tek ön koşul PostgreSQL 16+.</span></li>
+        <li><b>Kurun</b><span>Windows'ta yönetici PowerShell ile <code>Install-BerMapServer.ps1</code>, Linux'ta <code>sudo ./install.sh</code>. Betik servisi kurar, veritabanı şemasını hazırlar ve sunucu hazır olana kadar bekler.</span></li>
+        <li><b>Giriş yapın</b><span>Betik konsol adresini, ilk <code>admin</code> parolasını ve collector kayıt token'ını yazar. İlk girişte parolanızı değiştirin, ekibiniz için kullanıcı ve rol tanımlayın.</span></li>
         <li><b>Bağlayın</b><span>Konsola giriş yapın, Entegrasyonlar ekranından AD ve vCenter'ı ekleyin, bağlantıyı test edip ilk keşfi başlatın. Sonraki keşifler entegrasyonun cron takvimine göre kendiliğinden çalışır.</span></li>
       </ol>
       <figure class="install-shot">
@@ -137,12 +137,12 @@
       </figure>
     </div>
     <div class="downloads">
-      <a class="button" href="https://github.com/BerkayAtag/BerMap">GitHub deposu <span aria-hidden="true">↗</span></a>
-      <a class="button secondary" href="https://github.com/BerkayAtag/BerMap#5-quick-start-development">Hızlı başlangıç</a>
+      <a class="button" href="https://github.com/BerkayAtag/BerMap/releases/latest">Son sürüm ve paketler <span aria-hidden="true">↓</span></a>
+      <a class="button secondary" href="https://github.com/BerkayAtag/BerMap/blob/main/deploy/KURULUM.md">Kurulum rehberi</a>
       <a class="link" href="https://github.com/BerkayAtag/BerMap/tree/main/docs/architecture">Mimari belgeler →</a>
-      <a class="link" href="https://github.com/BerkayAtag/BerMap/blob/main/docs/architecture/13-installation-upgrade.md">Kurulum ve yükseltme →</a>
+      <a class="link" href="https://github.com/BerkayAtag/BerMap">GitHub deposu →</a>
     </div>
-    <p class="note">BerMap önizleme sürümündedir: hazır kurulum paketi yoktur; simülasyon her zaman güncel graf üzerinde çalışır. Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.</p>
+    <p class="note">Paketler kod imzalı değildir; bütünlüğü SHA256SUMS.txt ile doğrulayın. Her sürüm yayımlanmadan önce temiz Windows ve Linux sunucularında kurulup test edilir. Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.</p>
   </section>
 </main>
 

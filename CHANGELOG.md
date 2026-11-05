@@ -1,5 +1,26 @@
 # Sürüm geçmişi
 
+## 0.3.0 — 2026-11-05
+
+### Yeni
+- **Sunucu paketleri:** Windows (`BerMap-Server-<sürüm>-win-x64.zip`) ve Linux (`bermap-server-<sürüm>-linux-x64|arm64.tar.gz`) için self-contained paketler; web konsolu dahil. Windows servisi ve systemd servisi kuran, yükselten ve kaldıran betikler; Türkçe kurulum rehberi. Yapılandırma program dizininin dışında tutulur.
+- **Release iş akışı:** paketler her sürümde temiz Windows ve Linux çalıştırıcılarında kurulur, giriş yapılır, yükseltilir ve kaldırılır; testler geçmeden release oluşmaz.
+- **Kullanıcı yönetimi:** kullanıcı oluşturma, rol atama, devre dışı bırakma, parola sıfırlama; kendi parolasını değiştirme. Parola değişimi, sıfırlama ve devre dışı bırakma eski oturumları geçersiz kılar; son platform yöneticisi korunur.
+- **Simülasyon:** "Etki Analizi" ile tek ekranda birleşti; yeni iş yükü kesintisi senaryosu; senaryo-hedef türü doğrulaması; host arızasında cluster kapasitesi N-1 hesaplanır ve yalnız hedefin cluster'ı değerlendirilir; öneriler Türkçe/İngilizce; yazdırılabilir **değişiklik risk raporu** ve Markdown indirme.
+- **Entegrasyonlar:** düzenleme, collector yönetimli entegrasyonlar (sunucu tarafında test/keşif yapılmaz), zorunlu yapılandırma ve sunucu adresi doğrulaması, iş ayrıntısında hata ve uyarılar.
+- **Denetim ve raporlar:** denetim kaydında filtre, sayfalama ve CSV; yalnız yönetici ve güvenlik denetçisi görebilir. Raporlar sayfası envanter, denetim ve snapshot dışa aktarımları sunar.
+- **Collector kaldırma**, harita düğüm panelinden envantere ve simülasyona geçiş, kapasite eşikleri, mobil uyumlu konsol (çekmece menü, kullanıcı menüsü).
+
+### Kaldırılanlar
+- "Olaylar & Uyarılar" sayfası (panonun kopyasıydı), "Görünüm" düğmesi (işlevsizdi), boş `BerMap.Worker` projesi.
+
+### Düzeltmeler
+- Simülasyon: N-1 kapasite, yanlış cluster seçimi, başka cluster'ın HA durumu, eskimiş bağlantıların sayılması, grafik kırpılmasının gizlenmesi.
+- Pano "son değişiklikler" yalnız gerçek keşif ve durum değişikliklerini gösteriyor; çok kaynaklı düğümlerde durum artık kaynaklar arasında gidip gelmiyor.
+- Entegrasyon durumu: yeni entegrasyon "Pasif" görünmüyor, yeniden etkinleştirme hatayı gizlemiyor, kısmi sonuç hataya dönüşmüyor; silme keşfedilen verileri, işleri ve bekleyen incelemeleri kapatıyor.
+- CSV formül enjeksiyonu (Türkçe Excel `;` ayırıcısı dahil), global aramada klavye seçimi ve derin bağlantılar, envanter sıralaması, inceleme reddedilince kalan çift kayıt bağlantısı, doğrulama hatalarında doğru durum kodları.
+- Servis, veritabanı hazır olmadan da başlar ve hazır olana kadar `/api` isteklerine 503 döner (Windows açılışında PostgreSQL geç gelirse servis artık düşmüyor).
+
 ## 0.2.0 — 2026-11-04
 
 ### Yeni

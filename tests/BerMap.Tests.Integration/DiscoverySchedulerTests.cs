@@ -28,10 +28,10 @@ public sealed class DiscoverySchedulerTests : IAsyncLifetime
     private string _vaultDirectory = string.Empty;
     private WebApplicationFactory<Program>? _factory;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))
-            return Task.CompletedTask;
+            return;
 
         _databaseName = "bermap_it_" + Guid.NewGuid().ToString("N")[..12];
         _vaultDirectory = Path.Combine(Path.GetTempPath(), _databaseName + "-vault");
@@ -47,8 +47,7 @@ public sealed class DiscoverySchedulerTests : IAsyncLifetime
             builder.UseSetting("BerMap:DiscoveryScheduler:TimeZone", "UTC");
             builder.UseSetting("BerMap:DiscoveryWorker:Enabled", "false");
         });
-        _factory.CreateClient().Dispose();
-        return Task.CompletedTask;
+        await _factory.WaitUntilReadyAsync();
     }
 
     public async Task DisposeAsync()

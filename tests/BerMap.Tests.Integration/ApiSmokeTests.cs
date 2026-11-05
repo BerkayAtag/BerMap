@@ -44,9 +44,8 @@ public sealed class ApiSmokeTests : IAsyncLifetime
             builder.UseSetting("BerMap:Collectors:EnrollmentToken", "integration-test-token");
         });
 
-        // Creating the client starts the host, which migrates the empty database.
-        _factory.CreateClient().Dispose();
-        await Task.CompletedTask;
+        // Starting the host migrates the empty database in the background.
+        await _factory.WaitUntilReadyAsync();
     }
 
     public async Task DisposeAsync()

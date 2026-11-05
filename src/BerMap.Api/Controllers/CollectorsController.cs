@@ -14,6 +14,7 @@ using BerMap.Contracts;
 using BerMap.Domain.Entities;
 using BerMap.Domain.Enums;
 using BerMap.Infrastructure.Data;
+using BerMap.Infrastructure.Services;
 using BerMap.Api.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -194,12 +195,33 @@ public class CollectorsController : ControllerBase
         }
 
         var integrationId = batch.IntegrationId.Value;
-        var integrationExists = await _context.Integrations
+        var target = await _context.Integrations
             .AsNoTracking()
-            .AnyAsync(i => i.Id == integrationId && i.DeletedAt == null, cancellationToken);
+            .Where(i => i.Id == integrationId && i.DeletedAt == null)
+            .Select(i => new { i.IsEnabled, i.CollectorManaged })
+            .FirstOrDefaultAsync(cancellationToken);
 
-        if (!integrationExists)
+        if (target == null)
             return NotFound(new { message = $"Integration '{integrationId}' was not found." });
+
+        // A disabled integration must stop feeding the inventory, and one the
+        // server discovers itself has a single writer: the server.
+        if (!target.IsEnabled)
+        {
+            return Conflict(new
+            {
+                code = "INTEGRATION_DISABLED",
+                message = $"Integration '{integrationId}' is disabled; collector batches are not accepted."
+            });
+        }
+        if (!target.CollectorManaged)
+        {
+            return Conflict(new
+            {
+                code = "NOT_COLLECTOR_MANAGED",
+                message = $"Integration '{integrationId}' is discovered by the server, not by a collector."
+            });
+        }
 
         // Protocol: a batch without jobId opens a collector job. final=true
         // completes it (a single-batch snapshot sends final=true right away);
@@ -218,6 +240,10 @@ public class CollectorsController : ControllerBase
         }
         else
         {
+            // A collector that crashed mid-snapshot never closes its job; the
+            // next snapshot it opens fails the abandoned one.
+            await IntegrationHealth.FailAbandonedCollectorJobsAsync(_context, integrationId, cancellationToken);
+
             job = new DiscoveryJob
             {
                 Id = Guid.NewGuid(),

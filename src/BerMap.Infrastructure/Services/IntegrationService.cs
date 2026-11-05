@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using BerMap.Application.DTOs;
 using BerMap.Application.Interfaces;
 using BerMap.Application.Services.Integrations;
+using BerMap.Application.Services.Reconciliation;
 using BerMap.Application.Services.Scheduling;
 using BerMap.Contracts;
 using BerMap.Domain.Entities;
@@ -20,8 +21,6 @@ namespace BerMap.Infrastructure.Services;
 
 public sealed class IntegrationService : IIntegrationService
 {
-    private static readonly TimeSpan AbandonedCollectorJobAge = TimeSpan.FromMinutes(30);
-
     private static readonly HashSet<string> CommonSecretKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "password", "secret", "token", "apikey", "api_key", "clientsecret", "client_secret",
@@ -238,7 +237,7 @@ public sealed class IntegrationService : IIntegrationService
             integration.LastError = string.Empty;
             integration.LastErrorAt = null;
             integration.LastTestSuccess = null;
-            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
+            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, lastOutcome: null);
         }
 
         if (request.IsEnabled.HasValue && request.IsEnabled.Value != integration.IsEnabled)
@@ -246,8 +245,9 @@ public sealed class IntegrationService : IIntegrationService
             Track("isEnabled", integration.IsEnabled, request.IsEnabled.Value);
             integration.IsEnabled = request.IsEnabled.Value;
 
-            // Re-enabling must not hide a failed test or discovery.
-            integration.Status = IntegrationStatusRules.Resting(integration.IsEnabled, integration.LastError);
+            // Re-enabling must not hide a failed test or discovery, nor turn
+            // a partial (Degraded) run into an Error.
+            integration.Status = await IntegrationHealth.RestingStatusAsync(_context, integration, cancellationToken);
         }
 
         if (request.ClearSecret)
@@ -303,7 +303,7 @@ public sealed class IntegrationService : IIntegrationService
         }
 
         var cancelledJobs = await CloseJobsOfDeletedIntegrationAsync(id, cancellationToken);
-        var cleanup = await RetireDiscoveredDataAsync(id, cancellationToken);
+        var cleanup = await RetireDiscoveredDataAsync(id, actor, cancellationToken);
         integration.DiscoveredEntitiesCount = 0;
 
         await _context.SaveChangesAsync(cancellationToken);
@@ -316,7 +316,8 @@ public sealed class IntegrationService : IIntegrationService
                 jobsClosed = cancelledJobs,
                 sourceLinksStale = cleanup.Links,
                 nodesMarkedStale = cleanup.Nodes,
-                relationshipsMarkedStale = cleanup.Relationships
+                relationshipsMarkedStale = cleanup.Relationships,
+                reviewsDismissed = cleanup.Reviews
             }),
             GetIpAddress(), true, cancellationToken);
 
@@ -409,23 +410,9 @@ public sealed class IntegrationService : IIntegrationService
 
         var adapter = RequireAdapter(integration.AdapterType);
 
-        // Collector jobs stay Running between batches. One that has not
-        // received a batch for a long time was abandoned by its collector and
-        // must not block discovery of the integration forever.
-        var abandonedBefore = DateTime.UtcNow - AbandonedCollectorJobAge;
-        var abandoned = await _context.DiscoveryJobs
-            .Where(j => j.IntegrationId == id && j.JobType == "Collector" &&
-                        j.Status == DiscoveryJobStatus.Running &&
-                        (j.UpdatedAt ?? j.StartedAt) < abandonedBefore)
-            .ToListAsync(cancellationToken);
-        foreach (var stale in abandoned)
-        {
-            stale.Status = DiscoveryJobStatus.Failed;
-            stale.CompletedAt = DateTime.UtcNow;
-            stale.CurrentPhase = "Failed";
-            stale.CurrentMessage = "The collector stopped sending batches before the snapshot was completed.";
-        }
-        if (abandoned.Count > 0)
+        // A collector job left behind when the integration was switched to
+        // server-side discovery must not block discovery forever.
+        if (await IntegrationHealth.FailAbandonedCollectorJobsAsync(_context, id, cancellationToken) > 0)
             await _context.SaveChangesAsync(cancellationToken);
 
         var runningJob = await _context.DiscoveryJobs
@@ -585,10 +572,12 @@ public sealed class IntegrationService : IIntegrationService
     /// A deleted integration can never refresh what it discovered, so its
     /// source links and relationships become stale, and so does every node
     /// that no other live integration still reports — the same rule the
-    /// complete-snapshot sweep of ingestion applies.
+    /// complete-snapshot sweep of ingestion applies. Its pending
+    /// reconciliation reviews are dismissed: no ingestion can update them again.
     /// </summary>
-    private async Task<(int Links, int Nodes, int Relationships)> RetireDiscoveredDataAsync(
+    private async Task<(int Links, int Nodes, int Relationships, int Reviews)> RetireDiscoveredDataAsync(
         Guid integrationId,
+        string actor,
         CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
@@ -618,6 +607,35 @@ public sealed class IntegrationService : IIntegrationService
             .ToListAsync(cancellationToken);
         var orphanIds = nodeIds.Except(stillReported).ToList();
 
+        // Nodes other sources still report show the worst status of those
+        // sources only; the deleted integration's status no longer counts.
+        var remainingLinks = await _context.NodeSourceLinks
+            .AsNoTracking()
+            .Where(l => stillReported.Contains(l.NodeId) &&
+                        l.IntegrationId != integrationId &&
+                        !l.IsStale &&
+                        l.Integration.DeletedAt == null)
+            .Select(l => new { l.NodeId, l.PropertiesJson })
+            .ToListAsync(cancellationToken);
+        var effectiveStatus = remainingLinks
+            .GroupBy(l => l.NodeId)
+            .ToDictionary(g => g.Key, g => NodeStatusRules.Effective(g.Select(l => NodeStatusRules.Reported(l.PropertiesJson))));
+        var reportedNodes = await _context.InfrastructureNodes
+            .Where(n => stillReported.Contains(n.Id))
+            .ToListAsync(cancellationToken);
+        foreach (var node in reportedNodes)
+        {
+            if (effectiveStatus.GetValueOrDefault(node.Id) is not { } status ||
+                string.Equals(node.Status, status, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            node.Status = status;
+            node.StatusChangedAt = now;
+            node.UpdatedAt = now;
+        }
+
         var nodes = await _context.InfrastructureNodes
             .Where(n => orphanIds.Contains(n.Id) && !n.IsStale)
             .ToListAsync(cancellationToken);
@@ -638,7 +656,19 @@ public sealed class IntegrationService : IIntegrationService
             relationship.UpdatedAt = now;
         }
 
-        return (links.Count, nodes.Count, relationships.Count);
+        var reviews = await _context.ReconciliationReviews
+            .Where(r => r.IntegrationId == integrationId && r.Status == ReconciliationReviewStatus.Pending)
+            .ToListAsync(cancellationToken);
+        foreach (var review in reviews)
+        {
+            review.Status = ReconciliationReviewStatus.Dismissed;
+            review.ReviewedAt = now;
+            review.ReviewedBy = actor;
+            review.ResolutionNotes = "Integration deleted";
+            review.UpdatedAt = now;
+        }
+
+        return (links.Count, nodes.Count, relationships.Count, reviews.Count);
     }
 
     private static void RejectCollectorManaged(Integration integration)

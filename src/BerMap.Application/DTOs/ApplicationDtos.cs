@@ -93,6 +93,12 @@ public class ImpactAnalysisResultDto
     public List<ImpactedEntityDto> PossibleImpacts { get; set; } = new();
     public ClusterHeadroomDto ClusterHeadroom { get; set; } = new();
 
+    /// <summary>
+    /// True when the graph the simulation evaluated hit its node or edge cap:
+    /// impacts may be missing, so the result is a lower bound.
+    /// </summary>
+    public bool GraphTruncated { get; set; }
+
     /// <summary>English texts of <see cref="RecommendationItems"/>, in the same order.</summary>
     public List<string> Recommendations { get; set; } = new();
 
@@ -103,7 +109,8 @@ public class ImpactAnalysisResultDto
 public class RecommendationItemDto
 {
     // no_direct_impact, metrics_missing, failover_not_confirmed, headroom_sufficient,
-    // workloads_unavailable, dependents_degrade, ha_disabled, single_point_of_failure
+    // workloads_unavailable, dependents_degrade, ha_disabled, single_point_of_failure,
+    // graph_truncated
     public string Code { get; set; } = string.Empty;
     public string Text { get; set; } = string.Empty;
     public Dictionary<string, string> Values { get; set; } = new();

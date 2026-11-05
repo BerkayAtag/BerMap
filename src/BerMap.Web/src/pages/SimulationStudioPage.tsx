@@ -29,6 +29,8 @@ import {
   SCENARIOS,
   SCENARIO_LABELS,
   SCENARIO_TARGET_TYPES,
+  SIMULATABLE_NODE_TYPES,
+  canSimulate,
   isValidTarget,
   localizeRecommendations,
   normalizeScenario,
@@ -575,6 +577,13 @@ const SelectionSummary: React.FC<SelectionSummaryProps> = ({
       {targetLoadError && (
         <p className="p-2.5 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300" role="alert">
           {targetLoadError}
+        </p>
+      )}
+      {!scenario && targetNode && !canSimulate(targetNode.nodeType) && (
+        <p className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300" role="status">
+          {isTr
+            ? `${targetNode.nodeType} türü için simülasyon senaryosu yok. Simüle edilebilen türler: ${SIMULATABLE_NODE_TYPES.join(', ')}.`
+            : `No simulation scenario applies to ${targetNode.nodeType}. Types that can be simulated: ${SIMULATABLE_NODE_TYPES.join(', ')}.`}
         </p>
       )}
       {scenario && targetNode && !targetMatches && (

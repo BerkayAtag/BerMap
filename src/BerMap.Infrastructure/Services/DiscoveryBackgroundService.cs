@@ -22,15 +22,18 @@ public sealed class DiscoveryBackgroundService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly StartupReadiness _readiness;
     private readonly ILogger<DiscoveryBackgroundService> _logger;
 
     public DiscoveryBackgroundService(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        StartupReadiness readiness,
         ILogger<DiscoveryBackgroundService> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _readiness = readiness;
         _logger = logger;
     }
 
@@ -44,6 +47,17 @@ public sealed class DiscoveryBackgroundService : BackgroundService
 
         var pollSeconds = Math.Clamp(_configuration.GetValue("BerMap:DiscoveryWorker:PollSeconds", 2), 1, 60);
         var pollInterval = TimeSpan.FromSeconds(pollSeconds);
+
+        // Jobs must not be claimed before the schema is current and
+        // interrupted jobs have been recovered.
+        try
+        {
+            await _readiness.WaitAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
 
         _logger.LogInformation("Discovery background worker started (poll interval {PollInterval}s).", pollSeconds);
 

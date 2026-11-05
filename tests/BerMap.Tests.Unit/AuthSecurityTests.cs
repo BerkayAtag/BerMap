@@ -28,12 +28,13 @@ public class AuthSecurityTests
         {
             var service = new AccessTokenService(vault, TimeSpan.FromMinutes(30));
             var userId = Guid.NewGuid();
-            var (token, _) = service.Issue(userId, "admin", "Platform Administrator", "PlatformAdministrator");
+            var (token, _) = service.Issue(userId, "admin", "Platform Administrator", "PlatformAdministrator", "stamp-1");
 
             var principal = service.Validate(token, "test");
             Assert.NotNull(principal);
             Assert.Equal(userId.ToString(), principal!.FindFirstValue(ClaimTypes.NameIdentifier));
             Assert.True(principal.IsInRole("PlatformAdministrator"));
+            Assert.Equal("stamp-1", principal.FindFirstValue(AccessTokenService.SecurityStampClaimType));
 
             var tampered = token[..^2] + (token[^2] == 'A' ? "BB" : "AA");
             Assert.Null(service.Validate(tampered, "test"));
@@ -57,7 +58,7 @@ public class AuthSecurityTests
         try
         {
             var service = new AccessTokenService(vault, TimeSpan.FromSeconds(-5));
-            var (token, _) = service.Issue(Guid.NewGuid(), "admin", "Admin", "ReadOnlyViewer");
+            var (token, _) = service.Issue(Guid.NewGuid(), "admin", "Admin", "ReadOnlyViewer", "stamp");
             Assert.Null(service.Validate(token, "test"));
         }
         finally

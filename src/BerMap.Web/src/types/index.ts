@@ -10,6 +10,12 @@ export interface User {
   lastLogin?: string;
 }
 
+/** POST /api/auth/change-password: a fresh token for the current session. */
+export interface ChangePasswordResponse {
+  token: string;
+  expiresAt: string;
+}
+
 export interface AuthState {
   user: User | null;
   token: string | null;
@@ -502,6 +508,8 @@ export interface ImpactAnalysisResult {
   recommendations: string[];
   /** Coded recommendations, localized in the UI; `text` is the English fallback. */
   recommendationItems?: RecommendationItem[];
+  /** True when the simulation graph hit the response cap; the result may be incomplete. */
+  graphTruncated?: boolean;
 }
 
 /* ===== Audit ===== */

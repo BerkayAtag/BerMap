@@ -23,6 +23,18 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Installers keep the production settings outside the program directory, so
+// an upgrade that replaces the binaries cannot overwrite them. The file is
+// added last and therefore overrides every default source.
+var externalConfigFile = Environment.GetEnvironmentVariable("BERMAP_CONFIG_FILE");
+if (!string.IsNullOrWhiteSpace(externalConfigFile))
+{
+    builder.Configuration.AddJsonFile(
+        Path.GetFullPath(externalConfigFile, builder.Environment.ContentRootPath),
+        optional: false,
+        reloadOnChange: false);
+}
+
 // Release packages run the API as a Windows service or a systemd unit; both
 // calls are no-ops when the process is started from a console.
 builder.Host.UseWindowsService(options => options.ServiceName = "BerMapServer");
@@ -68,6 +80,22 @@ var vaultDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(configuredVaultD
     : configuredVaultDirectory, builder.Environment.ContentRootPath);
 
 builder.Services.AddSingleton<ICredentialStore>(_ => new CredentialStore(vaultDirectory));
+
+// The database is migrated and bootstrapped after the host has started, so
+// the Windows service / systemd unit reports started at once even while
+// PostgreSQL is unreachable or a long migration runs. Until then /api answers
+// 503 "starting", /healthz/ready is unhealthy and the discovery workers wait.
+var startupReadiness = new StartupReadiness();
+builder.Services.AddSingleton(startupReadiness);
+builder.Services.AddHostedService(services => new DatabaseInitializationService(
+    cancellationToken => DatabaseInitializer.InitializeAsync(
+        services,
+        services.GetRequiredService<IConfiguration>(),
+        vaultDirectory,
+        services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(DatabaseInitializer)),
+        cancellationToken),
+    startupReadiness,
+    services.GetRequiredService<ILogger<DatabaseInitializationService>>()));
 
 // Console sign-in: local accounts with PBKDF2 hashes and HMAC-signed bearer
 // tokens. Every API endpoint requires an authenticated user unless it is
@@ -172,7 +200,10 @@ builder.Services.AddCors(options =>
 
 builder.Services
     .AddHealthChecks()
-    .AddCheck<DatabaseHealthCheck>("database", HealthStatus.Unhealthy, new[] { "ready" });
+    .AddCheck<DatabaseHealthCheck>("database", HealthStatus.Unhealthy, new[] { "ready" })
+    .AddCheck("startup", () => startupReadiness.IsReady
+        ? HealthCheckResult.Healthy("The database is migrated and bootstrapped.")
+        : HealthCheckResult.Unhealthy("The database is still being initialised."), new[] { "ready" });
 
 var app = builder.Build();
 
@@ -230,29 +261,13 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi().AllowAnonymous();
 }
 
-// PostgreSQL may still be starting (service start order after a reboot,
-// containers starting together): retry for a while instead of exiting.
-for (var attempt = 1; ; attempt++)
-{
-    try
-    {
-        await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration, vaultDirectory, app.Logger);
-        break;
-    }
-    catch (Exception ex) when (attempt < 30 && ex is Npgsql.NpgsqlException or System.Net.Sockets.SocketException or TimeoutException)
-    {
-        app.Logger.LogWarning("Database is not reachable yet (attempt {Attempt}/30): {Message}. Retrying in 5 seconds.",
-            attempt, ex.Message);
-        await Task.Delay(TimeSpan.FromSeconds(5));
-    }
-}
-
 app.UseForwardedHeaders();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.UseRouting();
 app.UseCors("OnPremises");
+app.UseMiddleware<StartupGateMiddleware>();
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();

@@ -34,6 +34,7 @@ import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
 import { useCanOperate } from '@/stores/authStore';
+import { canSimulate } from './simulation/scenarios';
 import { Link, useSearchParams } from 'react-router-dom';
 import type {
   InventoryNode,
@@ -950,13 +951,16 @@ export const InventoryPage: React.FC = () => {
                         {isTr ? 'Uzlaştırma incelemesi bekliyor' : 'Awaiting reconciliation review'}
                       </span>
                     )}
-                    <Link
-                      to={`/simulation?target=${encodeURIComponent(detail.node.id)}`}
-                      className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-brand-primary dark:text-brand-primary-dark hover:underline"
-                    >
-                      <Play className="w-3.5 h-3.5" aria-hidden="true" />
-                      {isTr ? 'Simülasyon' : 'Simulation'}
-                    </Link>
+                    {/* Only node types a scenario can fail; others would open an empty Studio. */}
+                    {canSimulate(detail.node.nodeType) && (
+                      <Link
+                        to={`/simulation?target=${encodeURIComponent(detail.node.id)}`}
+                        className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-brand-primary dark:text-brand-primary-dark hover:underline"
+                      >
+                        <Play className="w-3.5 h-3.5" aria-hidden="true" />
+                        {isTr ? 'Simülasyon' : 'Simulation'}
+                      </Link>
+                    )}
                   </div>
 
                   <section>

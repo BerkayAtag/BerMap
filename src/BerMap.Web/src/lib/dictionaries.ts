@@ -200,6 +200,8 @@ export const recommendationTemplates: Record<'tr' | 'en', Record<string, string>
     ha_disabled: '{cluster} üzerinde VMware HA etkin değil; VM’ler otomatik olarak yeniden başlatılmayacak.',
     single_point_of_failure:
       '{target} tek hata noktası: iş yüklerini devralabilecek başka bir cluster hostu yok.',
+    graph_truncated:
+      '{target} çevresindeki graf yanıt sınırını aştı; sonuç eksik olabilir. Etkiyi doğrulamak için hedefe daha yakın bir bileşenle tekrar simüle edin.',
   },
   en: {
     no_direct_impact:
@@ -215,6 +217,8 @@ export const recommendationTemplates: Record<'tr' | 'en', Record<string, string>
       '{count} dependent service(s) may degrade ({names}); confirm their failure mode before the maintenance window.',
     ha_disabled: 'VMware HA is not enabled on {cluster}; there will be no automatic VM restart.',
     single_point_of_failure: '{target} is a single point of failure: no other cluster host can take over its workloads.',
+    graph_truncated:
+      'The graph around {target} exceeded the response limit, so this result may be incomplete. Re-run against a component closer to the target to confirm the impact.',
   },
 };
 

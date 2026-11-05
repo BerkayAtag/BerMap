@@ -635,6 +635,107 @@ public class SimulationEngineTests
         Assert.Equal("no_direct_impact", item.Code);
         Assert.Equal("esx-idle", item.Values["target"]);
     }
+
+    [Fact]
+    public async Task StaleEdgesAndNodes_AreNotImpacts_AfterAVMotion()
+    {
+        // vm-01 moved from esx-a (CL-PROD) to esx-b (CL-SIBLING): the old
+        // HostedOn edge stays as stale history next to the live one.
+        var topology = new ClusterTopology();
+        var newHost = Node("esx-b", "Hypervisor");
+        var retired = Node("app-retired", "Application");
+        retired.IsStale = true;
+        topology.Graph.Nodes.AddRange(new[] { newHost, retired });
+        topology.Graph.Relationships.Single(r => r.SourceNodeId == topology.Vm.Id && r.RelationshipType == "HostedOn").IsStale = true;
+        topology.Graph.Relationships.Add(Edge(topology.Vm, newHost, "HostedOn"));
+        topology.Graph.Relationships.Add(Edge(topology.Sibling, newHost, "Contains"));
+        topology.Graph.Relationships.Add(Edge(retired, topology.Vm, "DependsOn"));
+
+        var oldHost = await Run(topology.Graph, topology.Host, "host_failure");
+        Assert.Empty(oldHost.ConfirmedImpacts);
+        Assert.Equal("no_direct_impact", Assert.Single(oldHost.RecommendationItems).Code);
+
+        var liveHost = await Run(topology.Graph, newHost, "host_failure");
+        Assert.Equal("vm-01", Assert.Single(liveHost.ConfirmedImpacts).Name);
+        // The stale dependent is history, the live one still degrades.
+        Assert.Equal("app-01", Assert.Single(liveHost.ProbableImpacts).Name);
+
+        // The workload's cluster follows its live host, not the stale one.
+        var workload = await Run(topology.Graph, topology.Vm, "workload_outage");
+        Assert.Equal("CL-SIBLING", workload.ClusterHeadroom.ClusterName);
+    }
+
+    [Fact]
+    public async Task StaleTarget_IsStillSimulated()
+    {
+        var topology = new ClusterTopology();
+        topology.Host.IsStale = true;
+
+        var result = await Run(topology.Graph, topology.Host, "host_failure");
+
+        Assert.Equal("vm-01", Assert.Single(result.ConfirmedImpacts).Name);
+    }
+
+    [Fact]
+    public async Task TruncatedGraph_IsSurfaced_EvenWithoutDirectImpact()
+    {
+        var topology = new ClusterTopology();
+        topology.Graph.IsTruncated = true;
+
+        var hit = await Run(topology.Graph, topology.Host, "host_failure");
+        Assert.True(hit.GraphTruncated);
+        var item = hit.RecommendationItems[^1];
+        Assert.Equal("graph_truncated", item.Code);
+        Assert.Equal("esx-a", item.Values["target"]);
+        Assert.Equal(item.Text, hit.Recommendations[^1]);
+
+        var idleHost = Node("esx-idle", "Hypervisor");
+        topology.Graph.Nodes.Add(idleHost);
+        var idle = await Run(topology.Graph, idleHost, "host_failure");
+        Assert.Equal(new[] { "no_direct_impact", "graph_truncated" }, idle.RecommendationItems.Select(i => i.Code));
+
+        topology.Graph.IsTruncated = false;
+        var complete = await Run(topology.Graph, topology.Host, "host_failure");
+        Assert.False(complete.GraphTruncated);
+        Assert.DoesNotContain(complete.RecommendationItems, i => i.Code == "graph_truncated");
+    }
+
+    [Fact]
+    public async Task ImpactGraphSource_IsPreferredOverTheTopologyGraph()
+    {
+        var topology = new ClusterTopology();
+        var source = new ImpactOnlyGraphService(topology.Graph);
+
+        var result = await new SimulationEngine(source).RunSimulationAsync(new SimulationRunRequest
+        {
+            TargetNodeId = topology.Host.Id,
+            ScenarioType = "host_failure",
+        });
+
+        Assert.Equal((topology.Host.Id, 3), source.ImpactRequest);
+        Assert.Equal("vm-01", Assert.Single(result.ConfirmedImpacts).Name);
+    }
+
+    /// <summary>Serves the graph only as an impact graph; the topology graph is empty.</summary>
+    private sealed class ImpactOnlyGraphService(GraphQueryResultDto graph) : IGraphService, IImpactGraphSource
+    {
+        public (Guid, int)? ImpactRequest { get; private set; }
+
+        public Task<GraphQueryResultDto> GetImpactGraphAsync(Guid targetNodeId, int depth, CancellationToken cancellationToken = default)
+        {
+            ImpactRequest = (targetNodeId, depth);
+            return Task.FromResult(graph);
+        }
+
+        public Task<GraphQueryResultDto> GetTopologyGraphAsync(Guid? centerNodeId = null, int depth = 2, CancellationToken cancellationToken = default)
+            => Task.FromResult(new GraphQueryResultDto());
+
+        public Task<List<InfrastructureNodeDto>> SearchNodesAsync(string query, CancellationToken cancellationToken = default)
+            => Task.FromResult(new List<InfrastructureNodeDto>());
+
+        public Task<InfrastructureNodeDto?> GetNodeDetailsAsync(Guid id, CancellationToken cancellationToken = default)
+            => Task.FromResult<InfrastructureNodeDto?>(null);
+    }
 }
 
 /// <summary>Serves a fixed real graph (no fabricated values).</summary>

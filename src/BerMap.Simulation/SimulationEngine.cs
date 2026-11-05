@@ -75,7 +75,10 @@ public class SimulationEngine : ISimulationEngine
 
         var scenario = NormalizeScenario(request.ScenarioType);
 
-        var graph = await _graphService.GetTopologyGraphAsync(targetNodeId, depth: 3, cancellationToken);
+        var fetched = _graphService is IImpactGraphSource impactSource
+            ? await impactSource.GetImpactGraphAsync(targetNodeId, depth: 3, cancellationToken)
+            : await _graphService.GetTopologyGraphAsync(targetNodeId, depth: 3, cancellationToken);
+        var graph = LiveGraph(fetched, targetNodeId);
         var targetNode = graph.Nodes.FirstOrDefault(n => n.Id == targetNodeId)
             ?? throw new KeyNotFoundException(
                 $"Target node {targetNodeId} was not found in the inventory topology graph. Run a discovery first.");
@@ -91,6 +94,7 @@ public class SimulationEngine : ISimulationEngine
             TargetNodeId = targetNodeId,
             TargetNodeName = targetNode.Name,
             ScenarioType = scenario,
+            GraphTruncated = graph.IsTruncated,
         };
 
         switch (scenario)
@@ -130,9 +134,43 @@ public class SimulationEngine : ISimulationEngine
         result.ClusterHeadroom = CalculateClusterHeadroom(targetNode, clusterNode, scenario);
         result.RiskScore = CalculateRiskScore(result, scenario);
         result.RecommendationItems = BuildRecommendations(targetNode, clusterNode, scenario, result);
+        if (result.GraphTruncated)
+        {
+            // A capped graph can miss workloads and dependents: the result is a
+            // lower bound, not the whole blast radius.
+            result.RecommendationItems.Add(new RecommendationItemDto
+            {
+                Code = "graph_truncated",
+                Text = $"The dependency graph around {targetNode.Name} exceeded the analysis limit; impacts and the risk score are a lower bound.",
+                Values = new Dictionary<string, string> { ["target"] = targetNode.Name },
+            });
+        }
         result.Recommendations = result.RecommendationItems.Select(i => i.Text).ToList();
 
         return result;
+    }
+
+    /// <summary>
+    /// Stale nodes and relationships are history (a VM's old HostedOn edge
+    /// after a vMotion, the data of a deleted integration): they must not
+    /// count as impact. The target itself is kept so a stale target still
+    /// gets a clear answer instead of "not found".
+    /// </summary>
+    internal static GraphQueryResultDto LiveGraph(GraphQueryResultDto graph, Guid targetNodeId)
+    {
+        var staleNodeIds = graph.Nodes
+            .Where(n => n.IsStale && n.Id != targetNodeId)
+            .Select(n => n.Id)
+            .ToHashSet();
+
+        return new GraphQueryResultDto
+        {
+            Nodes = graph.Nodes.Where(n => !staleNodeIds.Contains(n.Id)).ToList(),
+            Relationships = graph.Relationships
+                .Where(r => !r.IsStale && !staleNodeIds.Contains(r.SourceNodeId) && !staleNodeIds.Contains(r.TargetNodeId))
+                .ToList(),
+            IsTruncated = graph.IsTruncated,
+        };
     }
 
     internal static string NormalizeScenario(string scenarioType) => scenarioType.Trim().ToLowerInvariant() switch

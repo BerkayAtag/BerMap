@@ -13,6 +13,18 @@ public class User : Entity
     public bool IsActive { get; set; } = true;
     public DateTime? LastLoginAt { get; set; }
 
+    /// <summary>
+    /// Random value embedded in every access token issued to the user. It is
+    /// replaced when the password is reset or changed, the account is disabled
+    /// or the role changes, which revokes every token issued before.
+    /// </summary>
+    public string SecurityStamp { get; set; } = NewSecurityStamp();
+
+    /// <summary>Replaces <see cref="SecurityStamp"/>, revoking the user's outstanding tokens.</summary>
+    public void RotateSecurityStamp() => SecurityStamp = NewSecurityStamp();
+
+    private static string NewSecurityStamp() => Guid.NewGuid().ToString("N");
+
     public ICollection<UserRoleAssignment> Roles { get; set; } = new List<UserRoleAssignment>();
 }
 

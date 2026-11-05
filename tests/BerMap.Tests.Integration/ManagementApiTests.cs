@@ -26,10 +26,10 @@ public sealed class ManagementApiTests : IAsyncLifetime
     private string _vaultDirectory = string.Empty;
     private WebApplicationFactory<Program>? _factory;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))
-            return Task.CompletedTask;
+            return;
 
         _databaseName = "bermap_it_" + Guid.NewGuid().ToString("N")[..12];
         _vaultDirectory = Path.Combine(Path.GetTempPath(), _databaseName + "-vault");
@@ -45,8 +45,7 @@ public sealed class ManagementApiTests : IAsyncLifetime
             builder.UseSetting("BerMap:DiscoveryScheduler:Enabled", "false");
             builder.UseSetting("BerMap:DiscoveryWorker:Enabled", "false");
         });
-        _factory.CreateClient().Dispose();
-        return Task.CompletedTask;
+        await _factory.WaitUntilReadyAsync();
     }
 
     public async Task DisposeAsync()
@@ -96,16 +95,18 @@ public sealed class ManagementApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Forbidden,
             (await viewer.PostAsJsonAsync("/api/snapshots", new { name = "viewer snapshot" })).StatusCode);
 
-        // A role change applies to the next request, without a new sign-in.
+        // A role change revokes the user's tokens; the next sign-in carries the new role.
         var promoted = await admin.PutAsJsonAsync($"/api/users/{userId}", new { role = "SecurityAuditor" });
         Assert.Equal(HttpStatusCode.OK, promoted.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await viewer.GetAsync("/api/audit")).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await viewer.GetAsync("/api/users")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await viewer.GetAsync("/api/auth/me")).StatusCode);
+        using var auditor = await ClientAsync("viewer.one", "Viewer-Password-123");
+        Assert.Equal(HttpStatusCode.OK, (await auditor.GetAsync("/api/audit")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await auditor.GetAsync("/api/users")).StatusCode);
 
         var deactivated = await admin.PutAsJsonAsync($"/api/users/{userId}", new { isActive = false });
         Assert.Equal(HttpStatusCode.OK, deactivated.StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await viewer.GetAsync("/api/auth/me")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await viewer.GetAsync("/api/inventory/nodes")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await auditor.GetAsync("/api/auth/me")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await auditor.GetAsync("/api/inventory/nodes")).StatusCode);
 
         var login = await _factory.CreateClient().PostAsJsonAsync("/api/auth/login",
             new { username = "viewer.one", password = "Viewer-Password-123" });
@@ -138,7 +139,14 @@ public sealed class ManagementApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, wrongCurrent.StatusCode);
         var changed = await operatorClient.PostAsJsonAsync("/api/auth/change-password",
             new { currentPassword = "Operator-Password-123", newPassword = "Operator-Password-456" });
-        Assert.Equal(HttpStatusCode.NoContent, changed.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+        var changedBody = await changed.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(changedBody.TryGetProperty("expiresAt", out _));
+
+        // The change revokes the token used for it; the returned token replaces it.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await operatorClient.GetAsync("/api/auth/me")).StatusCode);
+        using var renewed = WithToken(changedBody.GetProperty("token").GetString()!);
+        Assert.Equal(HttpStatusCode.OK, (await renewed.GetAsync("/api/auth/me")).StatusCode);
 
         var anonymous = _factory.CreateClient();
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsJsonAsync("/api/auth/login",
@@ -146,8 +154,48 @@ public sealed class ManagementApiTests : IAsyncLifetime
 
         var reset = await admin.PostAsJsonAsync($"/api/users/{operatorId}/reset-password", new { password = "Reset-Password-789" });
         Assert.Equal(HttpStatusCode.NoContent, reset.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await anonymous.PostAsJsonAsync("/api/auth/login",
-            new { username = "operator.one", password = "Reset-Password-789" })).StatusCode);
+
+        // A reset (for example after a suspected compromise) revokes every outstanding token.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await renewed.GetAsync("/api/auth/me")).StatusCode);
+        using var afterReset = await ClientAsync("operator.one", "Reset-Password-789");
+        Assert.Equal(HttpStatusCode.OK, (await afterReset.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Users_ConcurrentDemotions_LeaveOneActiveAdministrator()
+    {
+        if (_factory == null)
+            return;
+
+        using var admin = await ClientAsync("admin", AdminPassword);
+        var created = await admin.PostAsJsonAsync("/api/users", NewUser("admin.two", "PlatformAdministrator", "Second-Admin-Pa55"));
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var secondId = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString();
+        var users = await admin.GetFromJsonAsync<JsonElement>("/api/users");
+        var adminId = users.EnumerateArray().Single(u => u.GetProperty("username").GetString() == "admin")
+            .GetProperty("id").GetString();
+        using var second = await ClientAsync("admin.two", "Second-Admin-Pa55");
+
+        // Each administrator demotes themselves at the same time; each request
+        // alone passes the last-administrator check.
+        var results = await Task.WhenAll(
+            admin.PutAsJsonAsync($"/api/users/{adminId}", new { role = "ReadOnlyViewer" }),
+            second.PutAsJsonAsync($"/api/users/{secondId}", new { role = "ReadOnlyViewer" }));
+
+        Assert.Single(results, r => r.StatusCode == HttpStatusCode.OK);
+        Assert.Single(results, r => r.StatusCode == HttpStatusCode.Conflict);
+
+        await using var connection = new NpgsqlConnection(
+            new NpgsqlConnectionStringBuilder(_serverConnectionString) { Database = _databaseName }.ConnectionString);
+        await connection.OpenAsync();
+        await using var count = new NpgsqlCommand(
+            """
+            SELECT COUNT(*) FROM "Users" u
+            JOIN "UserRoles" a ON a."UserId" = u."Id"
+            JOIN "Roles" r ON r."Id" = a."RoleId"
+            WHERE u."IsActive" AND r."RoleType" = 0
+            """, connection);
+        Assert.Equal(1L, await count.ExecuteScalarAsync());
     }
 
     [Fact]
@@ -189,6 +237,14 @@ public sealed class ManagementApiTests : IAsyncLifetime
         Assert.Single(paged.GetProperty("items").EnumerateArray());
         Assert.Equal(200, (await admin.GetFromJsonAsync<JsonElement>("/api/audit?pageSize=5000")).GetProperty("pageSize").GetInt32());
 
+        // (page - 1) * pageSize would overflow int and reach PostgreSQL as a negative OFFSET.
+        var huge = await admin.GetAsync($"/api/audit?page={int.MaxValue}&pageSize=200");
+        Assert.Equal(HttpStatusCode.OK, huge.StatusCode);
+        var hugePage = await huge.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Empty(hugePage.GetProperty("items").EnumerateArray());
+        Assert.Equal(int.MaxValue, hugePage.GetProperty("page").GetInt32());
+        Assert.True(hugePage.GetProperty("totalCount").GetInt32() > 0);
+
         var export = await admin.GetAsync("/api/audit/export?success=false");
         Assert.Equal(HttpStatusCode.OK, export.StatusCode);
         Assert.Equal("text/csv", export.Content.Headers.ContentType?.MediaType);
@@ -196,8 +252,9 @@ public sealed class ManagementApiTests : IAsyncLifetime
         Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, bytes[..3]);
         var lines = Encoding.UTF8.GetString(bytes[3..]).Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(2, lines.Length);
-        Assert.StartsWith("createdAt,username,", lines[0]);
+        Assert.StartsWith("\"createdAt\",\"username\",", lines[0]);
         Assert.Contains(",\"'=HYPERLINK(\"\"x\"\")\",", lines[1]);
+        Assert.Contains(",\"false\",", lines[1]);
     }
 
     [Fact]
@@ -288,10 +345,15 @@ public sealed class ManagementApiTests : IAsyncLifetime
 
     private async Task<HttpClient> ClientAsync(string username, string password)
     {
-        var client = _factory!.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/auth/login", new { username, password });
+        using var anonymous = _factory!.CreateClient();
+        var response = await anonymous.PostAsJsonAsync("/api/auth/login", new { username, password });
         response.EnsureSuccessStatusCode();
-        var token = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+        return WithToken((await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString()!);
+    }
+
+    private HttpClient WithToken(string token)
+    {
+        var client = _factory!.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         return client;
     }

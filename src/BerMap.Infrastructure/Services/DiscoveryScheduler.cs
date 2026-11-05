@@ -175,15 +175,18 @@ public sealed class DiscoverySchedulerService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly DiscoveryScheduleSettings _settings;
+    private readonly StartupReadiness _readiness;
     private readonly ILogger<DiscoverySchedulerService> _logger;
 
     public DiscoverySchedulerService(
         IServiceScopeFactory scopeFactory,
         DiscoveryScheduleSettings settings,
+        StartupReadiness readiness,
         ILogger<DiscoverySchedulerService> logger)
     {
         _scopeFactory = scopeFactory;
         _settings = settings;
+        _readiness = readiness;
         _logger = logger;
     }
 
@@ -192,6 +195,16 @@ public sealed class DiscoverySchedulerService : BackgroundService
         if (!_settings.Enabled)
         {
             _logger.LogInformation("Scheduled discovery is disabled by configuration.");
+            return;
+        }
+
+        // The first pass reads integrations, so it waits for the migrated schema.
+        try
+        {
+            await _readiness.WaitAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
             return;
         }
 

@@ -35,5 +35,7 @@ jobs:
         working-directory: src/BerMap.Web
       - run: npm run lint
         working-directory: src/BerMap.Web
+      - run: npm test
+        working-directory: src/BerMap.Web
       - run: npm run build
         working-directory: src/BerMap.Web

@@ -22,6 +22,7 @@ import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber, getErrorMessage, toNodeStatus } from '@/lib/format';
 import type { GraphQueryResult, InfrastructureNode } from '@/types';
+import { canSimulate } from './simulation/scenarios';
 import {
   Server,
   Database,
@@ -448,15 +449,17 @@ export const InfrastructureMapPage: React.FC = () => {
                     <ExternalLink className="w-3.5 h-3.5" />
                     {isTr ? 'Envanterde aç' : 'Open in inventory'}
                   </ButtonLink>
-                  <ButtonLink
-                    to={`/simulation?target=${encodeURIComponent(selectedNode.id)}`}
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    {isTr ? 'Simülasyon' : 'Simulation'}
-                  </ButtonLink>
+                  {canSimulate(selectedNode.nodeType) && (
+                    <ButtonLink
+                      to={`/simulation?target=${encodeURIComponent(selectedNode.id)}`}
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      {isTr ? 'Simülasyon' : 'Simulation'}
+                    </ButtonLink>
+                  )}
                 </div>
 
                 <div className="space-y-2 text-xs pt-2">

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -46,11 +47,17 @@ public class AuditController : ControllerBase
         var query = Filter(_context.AuditLogs.AsNoTracking(), request);
         var total = await query.CountAsync(cancellationToken);
 
-        var items = await Order(query)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .Select(ToDto)
-            .ToListAsync(cancellationToken);
+        // Computed as long: (page - 1) * pageSize overflows int for huge page
+        // numbers, and a negative OFFSET is rejected by PostgreSQL. A page
+        // past the end is empty without another query.
+        var skip = (page - 1L) * pageSize;
+        var items = skip >= total
+            ? new List<AuditLogDto>()
+            : await Order(query)
+                .Skip((int)skip)
+                .Take(pageSize)
+                .Select(ToDto)
+                .ToListAsync(cancellationToken);
 
         return Ok(new AuditPageDto { Items = items, TotalCount = total, Page = page, PageSize = pageSize });
     }

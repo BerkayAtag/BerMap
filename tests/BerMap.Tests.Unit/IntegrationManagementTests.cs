@@ -62,12 +62,14 @@ public sealed class IntegrationManagementTests : IDisposable
 
     [Theory]
     [InlineData(true, null, IntegrationStatus.Active)]
-    [InlineData(true, "LDAP_BIND: invalid credentials", IntegrationStatus.Error)]
+    [InlineData(true, IntegrationStatus.Active, IntegrationStatus.Active)]
+    [InlineData(true, IntegrationStatus.Error, IntegrationStatus.Error)]
+    [InlineData(true, IntegrationStatus.Degraded, IntegrationStatus.Degraded)]
     [InlineData(false, null, IntegrationStatus.Inactive)]
-    [InlineData(false, "LDAP_BIND: invalid credentials", IntegrationStatus.Inactive)]
-    public void RestingStatus_FollowsEnabledFlagAndLastError(bool enabled, string? lastError, IntegrationStatus expected)
+    [InlineData(false, IntegrationStatus.Error, IntegrationStatus.Inactive)]
+    public void RestingStatus_FollowsEnabledFlagAndLastOutcome(bool enabled, IntegrationStatus? lastOutcome, IntegrationStatus expected)
     {
-        Assert.Equal(expected, IntegrationStatusRules.Resting(enabled, lastError));
+        Assert.Equal(expected, IntegrationStatusRules.Resting(enabled, lastOutcome));
     }
 
     [Fact]

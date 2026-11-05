@@ -6,8 +6,10 @@ using System.Text;
 namespace BerMap.Application.Services.Export;
 
 /// <summary>
-/// RFC 4180 CSV for spreadsheet users. Values that a spreadsheet would run as
-/// a formula (leading =, +, -, @, tab or CR) are prefixed with a single quote,
+/// RFC 4180 CSV for spreadsheet users. Every cell is quoted, so no list
+/// separator inside a value (',' here, ';' under Turkish regional settings,
+/// tab) can split it into a new cell. Values that a spreadsheet would run as a
+/// formula (leading =, +, -, @, tab or CR) are prefixed with a single quote,
 /// because names and details come from discovered systems and other users.
 /// </summary>
 public static class CsvWriter
@@ -21,13 +23,14 @@ public static class CsvWriter
     public static string Cell(string? value)
     {
         if (string.IsNullOrEmpty(value))
-            return string.Empty;
+            return "\"\"";
 
+        // Because the cell is always quoted, only its first character can
+        // start a formula.
         if (value[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
             value = "'" + value;
 
-        var needsQuotes = value.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0;
-        return needsQuotes ? "\"" + value.Replace("\"", "\"\"") + "\"" : value;
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
     }
 
     public static byte[] ToUtf8WithBom(StringBuilder csv)
