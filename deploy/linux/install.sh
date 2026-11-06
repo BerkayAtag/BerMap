@@ -271,7 +271,8 @@ cp -a "$PACKAGE_DIR/server/." "$INSTALL_DIR/"
 chown -R root:root "$INSTALL_DIR"
 
 mkdir -p "$DATA_DIR/vault"
-chown -R bermap:bermap "$DATA_DIR"
+# The collector keeps its data in $DATA_DIR/collector under its own user (KURULUM-COLLECTOR.md).
+find "$DATA_DIR" -path "$DATA_DIR/collector" -prune -o -exec chown bermap:bermap {} +
 chmod 700 "$DATA_DIR/vault"
 
 # The unit points the server at $CONFIG_FILE (BERMAP_CONFIG_FILE).

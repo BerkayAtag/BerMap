@@ -173,7 +173,6 @@ public class GraphRepository : IGraphService, IImpactGraphSource
         CancellationToken cancellationToken = default)
     {
         var result = new GraphQueryResultDto();
-        depth = Math.Clamp(depth, 1, 5);
 
         var target = await _context.InfrastructureNodes
             .AsNoTracking()
@@ -181,60 +180,28 @@ public class GraphRepository : IGraphService, IImpactGraphSource
         if (target == null)
             return result;
 
-        var visited = new HashSet<Guid> { target.Id };
-        var frontier = new HashSet<Guid> { target.Id };
-        var relationshipIds = new HashSet<Guid>();
-        var membershipAnchors = new HashSet<Guid> { target.Id };
-
-        for (var level = 0; level < depth && frontier.Count > 0; level++)
-        {
-            var relationships = await ImpactEdges(_context.InfrastructureRelationships.AsNoTracking())
+        var walk = await WalkImpactNeighbourhoodAsync(
+            target.Id,
+            depth,
+            (frontier, ct) => ImpactEdges(_context.InfrastructureRelationships.AsNoTracking())
                 .Where(r => frontier.Contains(r.SourceNodeId) || frontier.Contains(r.TargetNodeId))
                 .OrderBy(r => r.Id)
-                .Select(r => new { r.Id, r.SourceNodeId, r.TargetNodeId, r.RelationshipType })
                 .Take(MaxImpactRelationships + 1)
-                .ToListAsync(cancellationToken);
-            if (relationships.Count > MaxImpactRelationships)
-            {
-                relationships.RemoveAt(relationships.Count - 1);
-                result.IsTruncated = true;
-            }
+                .Select(r => new ImpactEdge(r.Id, r.SourceNodeId, r.TargetNodeId, r.RelationshipType))
+                .ToListAsync(ct),
+            (anchors, ct) => _context.InfrastructureRelationships
+                .AsNoTracking()
+                .Where(r => !r.IsStale &&
+                            ((r.RelationshipType == RelationshipType.MemberOf && anchors.Contains(r.SourceNodeId)) ||
+                             (r.RelationshipType == RelationshipType.Contains && anchors.Contains(r.TargetNodeId))))
+                .OrderBy(r => r.Id)
+                .Take(MaxImpactRelationships)
+                .Select(r => new ImpactEdge(r.Id, r.SourceNodeId, r.TargetNodeId, r.RelationshipType))
+                .ToListAsync(ct),
+            cancellationToken);
+        result.IsTruncated = walk.IsTruncated;
 
-            var next = new HashSet<Guid>();
-            foreach (var rel in relationships)
-            {
-                relationshipIds.Add(rel.Id);
-                if (level == 0 && rel.SourceNodeId == target.Id && rel.RelationshipType == RelationshipType.HostedOn)
-                    membershipAnchors.Add(rel.TargetNodeId);
-                if (visited.Add(rel.SourceNodeId))
-                    next.Add(rel.SourceNodeId);
-                if (visited.Add(rel.TargetNodeId))
-                    next.Add(rel.TargetNodeId);
-            }
-
-            if (visited.Count >= MaxImpactNodes)
-                break;
-
-            frontier = next;
-        }
-
-        var anchors = membershipAnchors.ToList();
-        var membership = await _context.InfrastructureRelationships
-            .AsNoTracking()
-            .Where(r => !r.IsStale &&
-                        ((r.RelationshipType == RelationshipType.MemberOf && anchors.Contains(r.SourceNodeId)) ||
-                         (r.RelationshipType == RelationshipType.Contains && anchors.Contains(r.TargetNodeId))))
-            .OrderBy(r => r.Id)
-            .Select(r => new { r.Id, r.SourceNodeId, r.TargetNodeId })
-            .Take(MaxImpactRelationships)
-            .ToListAsync(cancellationToken);
-        foreach (var rel in membership)
-        {
-            relationshipIds.Add(rel.Id);
-            visited.Add(rel.SourceNodeId);
-            visited.Add(rel.TargetNodeId);
-        }
-
+        var visited = walk.Visited;
         var nodes = await _context.InfrastructureNodes
             .AsNoTracking()
             .Where(n => visited.Contains(n.Id) && n.Id != target.Id)
@@ -246,6 +213,7 @@ public class GraphRepository : IGraphService, IImpactGraphSource
         result.IsTruncated |= visited.Count > nodes.Count;
 
         var nodeIds = nodes.Select(n => n.Id).ToHashSet();
+        var relationshipIds = walk.RelationshipIds;
         var relationshipsForNodes = await _context.InfrastructureRelationships
             .AsNoTracking()
             .Include(r => r.SourceNode)
@@ -269,9 +237,177 @@ public class GraphRepository : IGraphService, IImpactGraphSource
         return result;
     }
 
+    /// <summary>
+    /// The impact neighbourhood of <paramref name="targetNodeId"/> as it was when
+    /// the snapshot was captured. Same walk, edge rules and caps as
+    /// <see cref="GetImpactGraphAsync"/>, read from SnapshotNodes and
+    /// SnapshotRelationships; ids are the original graph ids, so the engine and
+    /// the console see the same identities as on the live graph.
+    /// </summary>
+    public async Task<SnapshotImpactGraph?> GetSnapshotImpactGraphAsync(
+        Guid snapshotId,
+        Guid targetNodeId,
+        int depth,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await _context.Snapshots
+            .AsNoTracking()
+            .Where(s => s.Id == snapshotId)
+            .Select(s => new { s.Id, s.Name, s.GraphCapturedAt })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (snapshot == null)
+            return null;
+
+        var graph = new SnapshotImpactGraph
+        {
+            SnapshotId = snapshot.Id,
+            SnapshotName = snapshot.Name,
+            SnapshotCreatedAt = snapshot.GraphCapturedAt,
+        };
+        var result = graph.Graph;
+
+        var target = await _context.SnapshotNodes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(n => n.SnapshotId == snapshotId && n.NodeId == targetNodeId, cancellationToken);
+        if (target == null)
+            return graph;
+
+        var walk = await WalkImpactNeighbourhoodAsync(
+            target.NodeId,
+            depth,
+            (frontier, ct) => SnapshotImpactEdges(_context.SnapshotRelationships.AsNoTracking(), snapshotId)
+                .Where(r => frontier.Contains(r.SourceNodeId) || frontier.Contains(r.TargetNodeId))
+                .OrderBy(r => r.RelationshipId)
+                .Take(MaxImpactRelationships + 1)
+                .Select(r => new ImpactEdge(r.RelationshipId, r.SourceNodeId, r.TargetNodeId, r.RelationshipType))
+                .ToListAsync(ct),
+            (anchors, ct) => _context.SnapshotRelationships
+                .AsNoTracking()
+                .Where(r => r.SnapshotId == snapshotId && !r.IsStale &&
+                            ((r.RelationshipType == RelationshipType.MemberOf && anchors.Contains(r.SourceNodeId)) ||
+                             (r.RelationshipType == RelationshipType.Contains && anchors.Contains(r.TargetNodeId))))
+                .OrderBy(r => r.RelationshipId)
+                .Take(MaxImpactRelationships)
+                .Select(r => new ImpactEdge(r.RelationshipId, r.SourceNodeId, r.TargetNodeId, r.RelationshipType))
+                .ToListAsync(ct),
+            cancellationToken);
+        result.IsTruncated = walk.IsTruncated;
+
+        var visited = walk.Visited;
+        var nodes = await _context.SnapshotNodes
+            .AsNoTracking()
+            .Where(n => n.SnapshotId == snapshotId && visited.Contains(n.NodeId) && n.NodeId != target.NodeId)
+            .OrderBy(n => n.NodeType)
+            .ThenBy(n => n.Name)
+            .Take(MaxImpactNodes - 1)
+            .ToListAsync(cancellationToken);
+        nodes.Insert(0, target);
+        result.IsTruncated |= visited.Count > nodes.Count;
+
+        var nodesById = nodes.ToDictionary(n => n.NodeId);
+        var relationshipIds = walk.RelationshipIds;
+        var relationships = await _context.SnapshotRelationships
+            .AsNoTracking()
+            .Where(r => r.SnapshotId == snapshotId && relationshipIds.Contains(r.RelationshipId))
+            .OrderBy(r => r.RelationshipId)
+            .Take(MaxImpactRelationships + 1)
+            .ToListAsync(cancellationToken);
+        if (relationships.Count > MaxImpactRelationships)
+        {
+            relationships.RemoveAt(relationships.Count - 1);
+            result.IsTruncated = true;
+        }
+
+        result.Nodes = nodes.Select(MapSnapshotNodeDto).ToList();
+        result.Relationships = relationships
+            .Where(r => nodesById.ContainsKey(r.SourceNodeId) && nodesById.ContainsKey(r.TargetNodeId))
+            .Select(r => MapSnapshotRelationshipDto(r, nodesById))
+            .ToList();
+
+        return graph;
+    }
+
+    /// <summary>One traversable edge of the impact walk, independent of where it is stored.</summary>
+    private readonly record struct ImpactEdge(Guid Id, Guid SourceNodeId, Guid TargetNodeId, RelationshipType RelationshipType);
+
+    private sealed class ImpactNeighbourhood
+    {
+        public HashSet<Guid> Visited { get; } = new();
+        public HashSet<Guid> RelationshipIds { get; } = new();
+        public bool IsTruncated { get; set; }
+    }
+
+    /// <summary>
+    /// The breadth-first walk shared by the live and the snapshot impact graph.
+    /// <paramref name="impactEdges"/> returns the live dependency/placement edges
+    /// touching the frontier (at most the cap + 1, so truncation is detectable);
+    /// <paramref name="membershipEdges"/> the non-stale MemberOf/Contains edges
+    /// that place the given anchors in a container.
+    /// </summary>
+    private static async Task<ImpactNeighbourhood> WalkImpactNeighbourhoodAsync(
+        Guid targetId,
+        int depth,
+        Func<HashSet<Guid>, CancellationToken, Task<List<ImpactEdge>>> impactEdges,
+        Func<List<Guid>, CancellationToken, Task<List<ImpactEdge>>> membershipEdges,
+        CancellationToken cancellationToken)
+    {
+        depth = Math.Clamp(depth, 1, 5);
+        var walk = new ImpactNeighbourhood();
+        walk.Visited.Add(targetId);
+        var frontier = new HashSet<Guid> { targetId };
+        var membershipAnchors = new HashSet<Guid> { targetId };
+
+        for (var level = 0; level < depth && frontier.Count > 0; level++)
+        {
+            var relationships = await impactEdges(frontier, cancellationToken);
+            if (relationships.Count > MaxImpactRelationships)
+            {
+                relationships.RemoveAt(relationships.Count - 1);
+                walk.IsTruncated = true;
+            }
+
+            var next = new HashSet<Guid>();
+            foreach (var rel in relationships)
+            {
+                walk.RelationshipIds.Add(rel.Id);
+                if (level == 0 && rel.SourceNodeId == targetId && rel.RelationshipType == RelationshipType.HostedOn)
+                    membershipAnchors.Add(rel.TargetNodeId);
+                if (walk.Visited.Add(rel.SourceNodeId))
+                    next.Add(rel.SourceNodeId);
+                if (walk.Visited.Add(rel.TargetNodeId))
+                    next.Add(rel.TargetNodeId);
+            }
+
+            if (walk.Visited.Count >= MaxImpactNodes)
+                break;
+
+            frontier = next;
+        }
+
+        var membership = await membershipEdges(membershipAnchors.ToList(), cancellationToken);
+        foreach (var rel in membership)
+        {
+            walk.RelationshipIds.Add(rel.Id);
+            walk.Visited.Add(rel.SourceNodeId);
+            walk.Visited.Add(rel.TargetNodeId);
+        }
+
+        return walk;
+    }
+
     /// <summary>Live edges an impact can travel along (the complement of the organisational ones).</summary>
     private static IQueryable<InfrastructureRelationship> ImpactEdges(IQueryable<InfrastructureRelationship> relationships) =>
         relationships.Where(r => !r.IsStale &&
+                                 r.RelationshipType != RelationshipType.Contains &&
+                                 r.RelationshipType != RelationshipType.MemberOf &&
+                                 r.RelationshipType != RelationshipType.ManagedBy &&
+                                 r.RelationshipType != RelationshipType.Trusts &&
+                                 r.RelationshipType != RelationshipType.PossibleDuplicate);
+
+    /// <summary>The same edge rule over one snapshot's frozen relationships.</summary>
+    private static IQueryable<SnapshotRelationship> SnapshotImpactEdges(IQueryable<SnapshotRelationship> relationships, Guid snapshotId) =>
+        relationships.Where(r => r.SnapshotId == snapshotId &&
+                                 !r.IsStale &&
                                  r.RelationshipType != RelationshipType.Contains &&
                                  r.RelationshipType != RelationshipType.MemberOf &&
                                  r.RelationshipType != RelationshipType.ManagedBy &&
@@ -418,4 +554,47 @@ public class GraphRepository : IGraphService, IImpactGraphSource
             IsStale = rel.IsStale
         };
     }
+
+    /// <summary>
+    /// A frozen node, mapped like a live one so the engine reads it the same way:
+    /// properties go through <see cref="ParseProperties"/>. Snapshots do not keep
+    /// per-source links, so the source list falls back to the discovery source.
+    /// </summary>
+    private static InfrastructureNodeDto MapSnapshotNodeDto(SnapshotNode node) => new()
+    {
+        Id = node.NodeId,
+        Name = node.Name,
+        FQDN = node.FQDN,
+        NodeType = node.NodeType.ToString(),
+        IPAddress = node.IPAddress,
+        MacAddress = node.MacAddress,
+        Status = node.Status,
+        DiscoverySource = node.DiscoverySource,
+        BiosUuid = node.BiosUuid,
+        VmInstanceUuid = node.VmInstanceUuid,
+        DomainSid = node.DomainSid,
+        IsStale = node.IsStale,
+        FirstSeen = node.FirstSeen,
+        LastSeen = node.LastSeen,
+        SourceSystems = string.IsNullOrWhiteSpace(node.DiscoverySource)
+            ? new List<string>()
+            : new List<string> { node.DiscoverySource },
+        Properties = ParseProperties(node.PropertiesJson)
+    };
+
+    private static InfrastructureRelationshipDto MapSnapshotRelationshipDto(
+        SnapshotRelationship rel,
+        IReadOnlyDictionary<Guid, SnapshotNode> nodesById) => new()
+    {
+        Id = rel.RelationshipId,
+        SourceNodeId = rel.SourceNodeId,
+        SourceNodeName = nodesById.TryGetValue(rel.SourceNodeId, out var source) ? source.Name : rel.SourceNodeId.ToString(),
+        TargetNodeId = rel.TargetNodeId,
+        TargetNodeName = nodesById.TryGetValue(rel.TargetNodeId, out var target) ? target.Name : rel.TargetNodeId.ToString(),
+        RelationshipType = rel.RelationshipType.ToString(),
+        ConfidenceLevel = rel.ConfidenceLevel.ToString(),
+        Evidence = rel.Evidence,
+        SourceSystem = rel.SourceSystem,
+        IsStale = rel.IsStale
+    };
 }

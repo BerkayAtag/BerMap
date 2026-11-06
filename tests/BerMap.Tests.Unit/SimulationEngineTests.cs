@@ -727,6 +727,9 @@ public class SimulationEngineTests
             return Task.FromResult(graph);
         }
 
+        public Task<SnapshotImpactGraph?> GetSnapshotImpactGraphAsync(Guid snapshotId, Guid targetNodeId, int depth, CancellationToken cancellationToken = default)
+            => Task.FromResult<SnapshotImpactGraph?>(null);
+
         public Task<GraphQueryResultDto> GetTopologyGraphAsync(Guid? centerNodeId = null, int depth = 2, CancellationToken cancellationToken = default)
             => Task.FromResult(new GraphQueryResultDto());
 

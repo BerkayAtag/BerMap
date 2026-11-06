@@ -16,9 +16,10 @@ import {
   Printer,
   Download,
   ExternalLink,
+  Camera,
 } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatNumber, getErrorMessage, getErrorStatus } from '@/lib/format';
+import { formatNumber, getErrorMessage, getErrorStatus, shortId } from '@/lib/format';
 import { downloadBlob } from '@/lib/csv';
 import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
@@ -47,7 +48,25 @@ import {
   riskReportFileName,
   type RiskReportInput,
 } from './simulation/riskReport';
-import type { ApiError, ClusterHeadroom, ImpactAnalysisResult, ImpactedEntity, InventoryNode, InventoryNodeDetail } from '@/types';
+import {
+  basisFromResult,
+  basisFromSelection,
+  basisLabel,
+  buildSimulationRequest,
+  classifySimulationError,
+  parseSnapshotParam,
+  snapshotOptionLabel,
+  type SimulationBasis,
+} from './simulation/simulationBasis';
+import type {
+  ApiError,
+  ClusterHeadroom,
+  ImpactAnalysisResult,
+  ImpactedEntity,
+  InventoryNode,
+  InventoryNodeDetail,
+  SnapshotSummary,
+} from '@/types';
 
 type TargetSummary = Pick<InventoryNode, 'id' | 'name' | 'nodeType' | 'fqdn'> &
   Partial<Pick<InventoryNode, 'status' | 'isStale' | 'sourceSystems'>>;
@@ -77,9 +96,11 @@ export const SimulationStudioPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // The URL is the source of truth for the selection, so links such as
-  // /simulation?target=<id>&scenario=host_failure open a ready-to-run study.
+  // /simulation?target=<id>&scenario=host_failure&snapshot=<id> open a
+  // ready-to-run study. No ?snapshot= means the live graph.
   const targetId = searchParams.get('target')?.trim() || null;
   const urlScenario = normalizeScenario(searchParams.get('scenario'));
+  const snapshotId = parseSnapshotParam(searchParams.get('snapshot'));
 
   // The node object for a target picked in the list (avoids a refetch).
   const [pickedNode, setPickedNode] = useState<InventoryNode | null>(null);
@@ -108,9 +129,20 @@ export const SimulationStudioPage: React.FC = () => {
   const inventoryTotal = inventoryProbe.data?.totalCount ?? 0;
   const inventoryError = inventoryProbe.isError ? getErrorMessage(inventoryProbe.error) : null;
 
+  // Snapshots the simulation can run on (newest first, as the API lists them).
+  const snapshotsQuery = useQuery<SnapshotSummary[]>({
+    queryKey: ['snapshots', 'list'],
+    queryFn: () => api.get<SnapshotSummary[]>('/snapshots'),
+  });
+  const snapshots = snapshotsQuery.data ?? [];
+  const snapshotsError = snapshotsQuery.isError ? getErrorMessage(snapshotsQuery.error) : null;
+  const basis = basisFromSelection(snapshotId, snapshotsQuery.data);
+  const snapshotListed = !!snapshotId && snapshots.some((item) => item.id === snapshotId);
+  const snapshotMissing = !!snapshotId && snapshotsQuery.isSuccess && !snapshotListed;
+
   const result = run?.result ?? null;
 
-  const updateSelection = (next: { scenario?: ScenarioType | null; target?: string | null }) => {
+  const updateSelection = (next: { scenario?: ScenarioType | null; target?: string | null; snapshot?: string | null }) => {
     const params = new URLSearchParams(searchParams);
     if ('scenario' in next) {
       if (next.scenario) params.set('scenario', next.scenario);
@@ -120,7 +152,16 @@ export const SimulationStudioPage: React.FC = () => {
       if (next.target) params.set('target', next.target);
       else params.delete('target');
     }
+    if ('snapshot' in next) {
+      if (next.snapshot) params.set('snapshot', next.snapshot);
+      else params.delete('snapshot');
+    }
     setSearchParams(params, { replace: true });
+  };
+
+  const selectBasis = (next: string) => {
+    setRunError(null);
+    updateSelection({ snapshot: next || null });
   };
 
   const selectScenario = (next: ScenarioType) => {
@@ -142,22 +183,22 @@ export const SimulationStudioPage: React.FC = () => {
     setRunError(null);
     setReportNotice(null);
     setPickedNode(null);
-    updateSelection({ scenario: null, target: null });
+    updateSelection({ scenario: null, target: null, snapshot: null });
   };
 
   const handleRunSimulation = async () => {
-    if (!targetNode || !scenario || !targetMatches) return;
+    if (!targetNode || !scenario || !targetMatches || snapshotMissing) return;
     const target = targetNode;
     setIsRunning(true);
     setRunError(null);
     setReportNotice(null);
     setRun(null);
     try {
-      // The engine always runs on the live graph.
-      const response = await api.post<ImpactAnalysisResult>('/simulations/run', {
-        targetNodeId: target.id,
-        scenarioType: scenario,
-      });
+      // The live graph, or the chosen snapshot's frozen graph.
+      const response = await api.post<ImpactAnalysisResult>(
+        '/simulations/run',
+        buildSimulationRequest(target.id, scenario, snapshotId),
+      );
       setRun({
         scenario,
         target: {
@@ -174,14 +215,28 @@ export const SimulationStudioPage: React.FC = () => {
       });
     } catch (error) {
       const apiError = error as Partial<ApiError>;
-      if (apiError.code === 'invalid_simulation') {
+      const kind = classifySimulationError(error);
+      if (kind === 'invalid_simulation') {
         setRunError(
           (isTr
             ? 'Bu senaryo seçilen hedefe uygulanamaz. Senaryoya uygun türde bir hedef seçin.'
             : 'This scenario cannot be applied to the selected target. Pick a target of a type the scenario supports.') +
             (apiError.message ? ` (${apiError.message})` : ''),
         );
-      } else if (getErrorStatus(error) === 404) {
+      } else if (kind === 'not_in_snapshot') {
+        setRunError(
+          isTr
+            ? `${target.name} seçilen snapshot'ta yok: snapshot alındığında bu bileşen envanterde değildi ya da daha önce kaldırılmıştı. Canlı grafı veya bu bileşeni içeren bir snapshot'ı seçin.`
+            : `${target.name} is not in the selected snapshot: it was not in the inventory when the snapshot was captured, or had been removed before. Choose the live graph or a snapshot that contains it.`,
+        );
+      } else if (kind === 'snapshot_not_found') {
+        setRunError(
+          isTr
+            ? 'Seçilen snapshot bulunamadı. Simülasyon tabanı olarak canlı grafı veya başka bir snapshot\'ı seçin.'
+            : 'The selected snapshot was not found. Choose the live graph or another snapshot as the simulation basis.',
+        );
+        void snapshotsQuery.refetch();
+      } else if (kind === 'target_not_found') {
         setRunError(
           isTr
             ? 'Hedef bileşen artık envanterde yok. Listeden başka bir hedef seçin.'
@@ -237,7 +292,8 @@ export const SimulationStudioPage: React.FC = () => {
   const level = result ? riskLevel(result.riskScore) : 'low';
   const recommendations = result ? localizeRecommendations(result, isTr) : [];
   const allowedTypes = scenario ? SCENARIO_TARGET_TYPES[scenario] : undefined;
-  const canRun = !isRunning && targetMatches;
+  const canRun = !isRunning && targetMatches && !snapshotMissing;
+  const resultBasis = result ? basisFromResult(result) : null;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -318,6 +374,84 @@ export const SimulationStudioPage: React.FC = () => {
         </Card>
       ) : (
         <>
+          {/* Simulation basis: the live graph or one snapshot's frozen graph */}
+          <Card className="p-4">
+            <div className="flex flex-col md:flex-row md:items-center gap-3">
+              <label
+                htmlFor="simulation-basis"
+                className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-neutral-500 shrink-0"
+              >
+                {snapshotId ? (
+                  <Camera className="w-4 h-4 text-brand-primary" aria-hidden="true" />
+                ) : (
+                  <Radio className="w-4 h-4 text-status-healthy" aria-hidden="true" />
+                )}
+                {isTr ? 'Simülasyon tabanı' : 'Simulation basis'}
+              </label>
+              <select
+                id="simulation-basis"
+                value={snapshotId ?? ''}
+                onChange={(event) => selectBasis(event.target.value)}
+                disabled={isRunning}
+                className="h-9 w-full md:w-auto md:min-w-[20rem] max-w-full rounded-lg border border-neutral-300 dark:border-dark-border bg-white dark:bg-dark-card px-3 text-sm text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
+              >
+                <option value="">{isTr ? 'Canlı graf (güncel envanter)' : 'Live graph (current inventory)'}</option>
+                {snapshotId && !snapshotListed && (
+                  <option value={snapshotId}>
+                    {snapshotsQuery.isLoading
+                      ? (isTr ? `Snapshot ${shortId(snapshotId)} (yükleniyor…)` : `Snapshot ${shortId(snapshotId)} (loading…)`)
+                      : (isTr ? `Snapshot ${shortId(snapshotId)} (bulunamadı)` : `Snapshot ${shortId(snapshotId)} (not found)`)}
+                  </option>
+                )}
+                {snapshots.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {snapshotOptionLabel(item, isTr)}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400 min-w-0">
+                {snapshotId
+                  ? isTr
+                    ? "Simülasyon seçilen snapshot'ın dondurulmuş grafı üzerinde çalışır. Hedef listesi güncel envanterden gelir; hedef o snapshot'ta yoksa bildirilir."
+                    : "The simulation runs on the selected snapshot's frozen graph. Targets are picked from the current inventory; a target the snapshot does not contain is reported."
+                  : snapshotsQuery.isSuccess && snapshots.length === 0
+                    ? (
+                      <>
+                        {isTr ? 'Henüz snapshot yok. ' : 'No snapshots yet. '}
+                        <Link to="/snapshots" className="text-brand-primary dark:text-brand-primary-dark hover:underline">
+                          {isTr ? 'Snapshot al' : 'Capture a snapshot'}
+                        </Link>
+                      </>
+                    )
+                    : isTr
+                      ? 'Simülasyon güncel envanter grafiği üzerinde çalışır. Değişikliği geçmiş bir duruma göre değerlendirmek için bir snapshot seçin.'
+                      : 'The simulation runs on the current inventory graph. Choose a snapshot to evaluate the change against an earlier state.'}
+              </p>
+            </div>
+            {snapshotsError && (
+              <p className="mt-3 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2" role="alert">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span className="flex-1">
+                  {isTr ? 'Snapshot listesi yüklenemedi: ' : 'Could not load the snapshot list: '}
+                  {snapshotsError}
+                </span>
+                <Button variant="outline" size="sm" onClick={() => void snapshotsQuery.refetch()}>
+                  {isTr ? 'Tekrar Dene' : 'Retry'}
+                </Button>
+              </p>
+            )}
+            {snapshotMissing && (
+              <p
+                className="mt-3 p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300"
+                role="status"
+              >
+                {isTr
+                  ? "Bağlantıdaki snapshot bulunamadı. Canlı grafı veya listeden bir snapshot'ı seçin."
+                  : 'The linked snapshot was not found. Choose the live graph or a snapshot from the list.'}
+              </p>
+            )}
+          </Card>
+
           {/* Scenario Configuration Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Step 1: Scenario Type */}
@@ -385,6 +519,8 @@ export const SimulationStudioPage: React.FC = () => {
                 targetMissing={targetMissing}
                 targetLoadError={targetLoadError ? getErrorMessage(targetQuery.error) : null}
                 targetMatches={targetMatches}
+                basis={basis}
+                snapshotMissing={snapshotMissing}
               />
             </Card>
           </div>
@@ -416,8 +552,26 @@ export const SimulationStudioPage: React.FC = () => {
                     </h3>
                     <p className="text-[11px] text-neutral-500 font-mono mt-0.5 break-all">
                       scenario: {run.scenario} · {run.target.nodeType}
-                      {run.target.fqdn ? ` · ${run.target.fqdn}` : ''} · {isTr ? 'taban: canlı graf' : 'base: live graph'}
+                      {run.target.fqdn ? ` · ${run.target.fqdn}` : ''}
                     </p>
+                    {resultBasis && (
+                      <p
+                        className={`mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-semibold max-w-full ${
+                          resultBasis.kind === 'snapshot'
+                            ? 'border-brand-primary/30 bg-brand-primary/5 text-brand-primary dark:text-brand-primary-dark'
+                            : 'border-neutral-200 dark:border-dark-border text-neutral-600 dark:text-neutral-400'
+                        }`}
+                      >
+                        {resultBasis.kind === 'snapshot' ? (
+                          <Camera className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <Radio className="w-3.5 h-3.5 shrink-0 text-status-healthy" aria-hidden="true" />
+                        )}
+                        <span className="truncate">
+                          {isTr ? 'Taban' : 'Basis'}: {basisLabel(resultBasis, isTr)}
+                        </span>
+                      </p>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -515,6 +669,8 @@ interface SelectionSummaryProps {
   targetMissing: boolean;
   targetLoadError: string | null;
   targetMatches: boolean;
+  basis: SimulationBasis;
+  snapshotMissing: boolean;
 }
 
 const SelectionSummary: React.FC<SelectionSummaryProps> = ({
@@ -526,6 +682,8 @@ const SelectionSummary: React.FC<SelectionSummaryProps> = ({
   targetMissing,
   targetLoadError,
   targetMatches,
+  basis,
+  snapshotMissing,
 }) => {
   const row = (label: string, value: React.ReactNode) => (
     <div className="flex items-start justify-between gap-3 py-1.5 border-b border-neutral-100 dark:border-dark-border last:border-0">
@@ -561,8 +719,12 @@ const SelectionSummary: React.FC<SelectionSummaryProps> = ({
         {row(
           isTr ? 'Simülasyon tabanı' : 'Simulation base',
           <span className="inline-flex items-center gap-1">
-            <Radio className="w-3.5 h-3.5 text-status-healthy shrink-0" aria-hidden="true" />
-            {isTr ? 'Canlı graf' : 'Live graph'}
+            {basis.kind === 'snapshot' ? (
+              <Camera className="w-3.5 h-3.5 text-brand-primary shrink-0" aria-hidden="true" />
+            ) : (
+              <Radio className="w-3.5 h-3.5 text-status-healthy shrink-0" aria-hidden="true" />
+            )}
+            {snapshotMissing ? (isTr ? 'Snapshot bulunamadı' : 'Snapshot not found') : basisLabel(basis, isTr)}
           </span>,
         )}
       </div>
@@ -591,6 +753,13 @@ const SelectionSummary: React.FC<SelectionSummaryProps> = ({
           {isTr
             ? `Bu senaryo ${targetNode.nodeType} türüne uygulanamaz. Uygun türler: ${SCENARIO_TARGET_TYPES[scenario].join(', ')}.`
             : `This scenario does not apply to ${targetNode.nodeType}. Supported types: ${SCENARIO_TARGET_TYPES[scenario].join(', ')}.`}
+        </p>
+      )}
+      {basis.kind === 'snapshot' && targetNode && !snapshotMissing && (
+        <p className="p-2.5 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/30 text-blue-800 dark:text-blue-300">
+          {isTr
+            ? "Hedef güncel envanterden seçildi; simülasyon onu snapshot'taki haliyle değerlendirir."
+            : 'The target is picked from the current inventory; the simulation evaluates it as captured in the snapshot.'}
         </p>
       )}
       {targetNode?.isStale && (

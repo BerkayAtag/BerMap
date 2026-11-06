@@ -49,6 +49,10 @@ Program `/opt/bermap/server`, yapılandırma `/etc/bermap/appsettings.Production
 **Yükseltme:** yeni paketle `sudo ./install.sh` (parametresiz). Yapılandırma birleştirilir; elle eklenen ayarlar korunur, yalnız verilen değerler değişir: `--db-host`, `--db-port`, `--db-name`, `--db-user` bağlantı dizesindeki ilgili alanı, `--port` dinlenen portu değiştirir. Veritabanı parolasını yenilemek için `sudo BERMAP_DB_PASSWORD=... ./install.sh` yeterlidir.
 **Kaldırma:** `sudo ./uninstall.sh` (yapılandırma, kasa ve veritabanı korunur; `--remove-data` kasayı ve yapılandırmayı da siler).
 
+## Collector
+
+Sunucunun doğrudan erişemediği ağlar için collector ayrı paketlerle gelir (`BerMap-Collector-<sürüm>-win-x64.zip`, `bermap-collector-<sürüm>-linux-x64|arm64.tar.gz`). Kurulum betiği sonunda yazılan collector kayıt token'ı ile kurulur: [collector kurulum rehberi](KURULUM-COLLECTOR.md).
+
 ## İlk giriş
 
 Kurulum sonunda betik konsol adresini, ilk yönetici (`admin`) parolasını ve collector kayıt token'ını yazar. Parola kasa dizinindeki `initial-admin-password.txt` dosyasındadır; ilk girişten sonra **Kullanıcılar** ekranından yeni parola belirleyip bu dosyayı silin.

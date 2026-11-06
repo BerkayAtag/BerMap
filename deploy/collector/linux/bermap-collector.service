@@ -1,0 +1,25 @@
+[Unit]
+Description=BerMap Collector (outbound discovery agent for remote networks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=bermap-collector
+Group=bermap-collector
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=@INSTALL_DIR@/BerMap.Collector
+Environment=DOTNET_ENVIRONMENT=Production
+# Configuration lives outside the program directory, which upgrades replace.
+Environment=BERMAP_CONFIG_FILE=/etc/bermap/collector.json
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=@DATA_DIR@
+
+[Install]
+WantedBy=multi-user.target

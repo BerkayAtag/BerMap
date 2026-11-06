@@ -37,6 +37,20 @@ sudo ./install.sh --db-host localhost --db-user bermap
 
 Betik dosyaları kopyalar, yapılandırmayı yazar, **BerMapServer** Windows servisini ya da `bermap-server` systemd servisini kurar, sunucu hazır olana kadar bekler ve sonunda konsol adresini, ilk yönetici (`admin`) parolasını ve collector kayıt token'ını yazar. Aynı betik yükseltme için de kullanılır; yapılandırma, kasa ve veritabanı korunur. HTTPS, port, dizinler ve kaldırma: [kurulum rehberi](deploy/KURULUM.md).
 
+### Collector kurulumu
+
+Sunucunun doğrudan erişemediği ağlarda (şube, DMZ, ayrı forest) keşfi yerinde yapan collector, aynı sürüm sayfasında ayrı paketlerle gelir ve sunucuya yalnız dışarı yönlü HTTPS ile bağlanır. Sunucu kurulumunun yazdığı collector kayıt token'ıyla:
+
+```powershell
+.\Install-BerMapCollector.ps1 -ServerUrl https://bermap.corp.local -Name dc2-collector    # BerMap-Collector-<sürüm>-win-x64.zip
+```
+
+```bash
+sudo BERMAP_ENROLLMENT_TOKEN='<token>' ./install.sh --server-url https://bermap.corp.local --name dc2-collector   # bermap-collector-<sürüm>-linux-x64.tar.gz
+```
+
+Betik **BerMapCollector** Windows servisini ya da `bermap-collector` systemd servisini kurar ve collector sunucuya kaydolana kadar bekler; collector konsolun **Collectorlar** sayfasında görünür. Entegrasyonlar sunucuda "collector yönetimli" olarak oluşturulup collector yapılandırmasına eklenir: [collector kurulum rehberi](deploy/KURULUM-COLLECTOR.md).
+
 Her sürüm yayımlanmadan önce paketler temiz Windows ve Linux çalıştırıcılarında gerçekten kurulur, giriş yapılır, yükseltilir ve kaldırılır ([release iş akışı](.github/workflows/release.yml)).
 
 ## Ekranlar

@@ -19,6 +19,7 @@ import {
   PowerOff,
   RefreshCw,
   Server,
+  Copy,
   ShieldCheck,
   Trash2,
   X,
@@ -580,6 +581,18 @@ export const IntegrationsPage: React.FC = () => {
                             <Server className="w-3 h-3" />
                             {isTr ? 'Collector yönetimli' : 'Collector-managed'}
                           </span>
+                        )}
+                        {isCollectorManaged && (
+                          // The collector configuration references the integration by this id.
+                          <button
+                            type="button"
+                            className="mt-1 ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-neutral-200 dark:border-dark-border text-[10px] font-mono text-neutral-600 dark:text-neutral-400 hover:border-brand-primary"
+                            title={isTr ? 'Collector yapılandırması için entegrasyon kimliğini kopyala' : 'Copy the integration id for the collector configuration'}
+                            onClick={() => void navigator.clipboard?.writeText(integration.id)}
+                          >
+                            <Copy className="w-3 h-3" />
+                            {integration.id.slice(0, 8)}…
+                          </button>
                         )}
                       </div>
                     </div>

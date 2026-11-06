@@ -468,6 +468,8 @@ export interface SimulationRunRequest {
   targetNodeId: string;
   /** host_failure | datastore_failure | network_partition | workload_outage */
   scenarioType: string;
+  /** Simulate on this snapshot's frozen graph; omitted for the live graph. */
+  snapshotId?: string;
 }
 
 export interface ImpactedEntity {
@@ -510,6 +512,11 @@ export interface ImpactAnalysisResult {
   recommendationItems?: RecommendationItem[];
   /** True when the simulation graph hit the response cap; the result may be incomplete. */
   graphTruncated?: boolean;
+  /** The snapshot the run used; null (or absent on older servers) for the live graph. */
+  snapshotId?: string | null;
+  snapshotName?: string | null;
+  /** When the snapshot's graph was captured (ISO timestamp). */
+  snapshotCreatedAt?: string | null;
 }
 
 /* ===== Audit ===== */

@@ -353,4 +353,59 @@ public class DiscoveryIngestionServiceTests
         Assert.Equal(0, result.NodesMarkedStale);
         Assert.False((await context.InfrastructureNodes.SingleAsync(n => n.Name == "esx01")).IsStale);
     }
+
+    [Fact]
+    public async Task Ingest_SameSourceRediscovery_RefreshesMetricsAndIdentity()
+    {
+        await using var context = CreateContext();
+        var integration = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        DiscoveredNodeContract Vm(string name, string ip, string cpu) => new()
+        {
+            ExternalId = "vm-42", NodeType = "VirtualMachine", Name = name, FQDN = name + ".corp.local",
+            IPAddress = ip, SourceSystem = "VMware",
+            Properties = new() { ["CpuUsagePercent"] = cpu, ["PowerState"] = "POWERED_ON" }
+        };
+
+        await service.IngestAsync(integration.Id, Guid.NewGuid(), BuildBatch(integration.Id, Vm("app-01", "10.0.0.1", "40")));
+        var second = Vm("app-01-renamed", "10.0.0.2", "85");
+        second.Properties["PowerState"] = "POWERED_OFF";
+        await service.IngestAsync(integration.Id, Guid.NewGuid(), BuildBatch(integration.Id, second));
+
+        var node = await context.InfrastructureNodes.SingleAsync();
+        Assert.Equal("app-01-renamed", node.Name);
+        Assert.Equal("app-01-renamed.corp.local", node.FQDN);
+        Assert.Equal("10.0.0.2", node.IPAddress);
+        Assert.Contains("\"CpuUsagePercent\":\"85\"", node.PropertiesJson);
+        Assert.Contains("\"PowerState\":\"POWERED_OFF\"", node.PropertiesJson);
+    }
+
+    [Fact]
+    public async Task Ingest_MultiSourceNode_KeepsIdentityButRefreshesReportedMetrics()
+    {
+        await using var context = CreateContext();
+        var ad = await SeedIntegrationAsync(context);
+        var vcenter = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(ad.Id, Guid.NewGuid(), BuildBatch(ad.Id, new DiscoveredNodeContract
+        {
+            ExternalId = "ad-app-01", NodeType = "Computer", Name = "APP-01", FQDN = "app-01.corp.local",
+            DomainSid = "S-1-5-21-9-1001", SourceSystem = "ActiveDirectory"
+        }));
+
+        DiscoveredNodeContract Vm(string name, string cpu) => new()
+        {
+            ExternalId = "vm-app-01", NodeType = "VirtualMachine", Name = name, FQDN = "app-01.corp.local",
+            SourceSystem = "VMware", Properties = new() { ["CpuUsagePercent"] = cpu }
+        };
+
+        await service.IngestAsync(vcenter.Id, Guid.NewGuid(), BuildBatch(vcenter.Id, Vm("app-01 (vSphere)", "30")));
+        await service.IngestAsync(vcenter.Id, Guid.NewGuid(), BuildBatch(vcenter.Id, Vm("app-01 (vSphere, renamed)", "77")));
+
+        var node = await context.InfrastructureNodes.SingleAsync();
+        Assert.Equal("APP-01", node.Name);
+        Assert.Contains("\"CpuUsagePercent\":\"77\"", node.PropertiesJson);
+    }
 }

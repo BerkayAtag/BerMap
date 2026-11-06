@@ -80,6 +80,12 @@ public class SimulationRunRequest
     // Nullable so a missing target is reported as a validation error (400), not a 404.
     public Guid? TargetNodeId { get; set; }
     public string ScenarioType { get; set; } = "host_failure"; // host_failure, datastore_failure, network_partition, workload_outage
+
+    /// <summary>
+    /// Optional basis: when set, the impact graph is built from this snapshot's
+    /// frozen nodes and relationships instead of the live graph.
+    /// </summary>
+    public Guid? SnapshotId { get; set; }
 }
 
 public class ImpactAnalysisResultDto
@@ -98,6 +104,14 @@ public class ImpactAnalysisResultDto
     /// impacts may be missing, so the result is a lower bound.
     /// </summary>
     public bool GraphTruncated { get; set; }
+
+    /// <summary>The snapshot the simulation ran on; null for the live graph.</summary>
+    public Guid? SnapshotId { get; set; }
+
+    public string? SnapshotName { get; set; }
+
+    /// <summary>When the snapshot's graph was captured; null for the live graph.</summary>
+    public DateTime? SnapshotCreatedAt { get; set; }
 
     /// <summary>English texts of <see cref="RecommendationItems"/>, in the same order.</summary>
     public List<string> Recommendations { get; set; } = new();

@@ -1,9 +1,9 @@
 name: Release
 
-# v* etiketiyle tetiklenir: Windows ve Linux sunucu paketleri üretilir, ikisi de temiz
-# çalıştırıcılarda gerçekten kurulup sağlık ve giriş kontrolünden geçer, ardından
-# SHA256SUMS.txt ile GitHub Releases'a yüklenir. workflow_dispatch aynı paketleri
-# ve kurulum testlerini yayınlamadan çalıştırır.
+# v* etiketiyle tetiklenir: Windows ve Linux sunucu ve collector paketleri üretilir, ikisi de
+# temiz çalıştırıcılarda gerçekten kurulup sağlık ve giriş kontrolünden geçer, collector aynı
+# makinedeki sunucuya kaydolur, ardından SHA256SUMS.txt ile GitHub Releases'a yüklenir.
+# workflow_dispatch aynı paketleri ve kurulum testlerini yayınlamadan çalıştırır.
 
 on:
   push:
@@ -48,12 +48,28 @@ jobs:
       - name: Web konsolu
         working-directory: src/BerMap.Web
         run: npm ci && npm test && npm run build
-      - name: Sunucu paketleri
+      - name: Kurulum betikleri (sözdizimi, yapılandırma birleştirme)
+        run: |
+          for script in deploy/package.sh deploy/linux/*.sh deploy/collector/linux/*.sh deploy/tests/*.sh; do bash -n "$script"; done
+          deploy/tests/collector-config.sh
+          pwsh -NoProfile -NonInteractive -Command '
+            $failed = $false
+            foreach ($file in Get-ChildItem deploy -Recurse -Filter *.ps1) {
+              $tokens = $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref] $tokens, [ref] $errors) | Out-Null
+              foreach ($e in $errors) { Write-Host "$($file.FullName):$($e.Extent.StartLineNumber): $($e.Message)"; $failed = $true }
+            }
+            if ($failed) { exit 1 }'
+          pwsh -NoProfile -NonInteractive -File deploy/tests/collector-config.ps1
+      - name: Sunucu ve collector paketleri
         env:
           VERSION: ${{ steps.version.outputs.version }}
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |
-          for rid in win-x64 linux-x64 linux-arm64; do deploy/package.sh "$VERSION" "$rid" out; done
+          for component in server collector; do
+            for rid in win-x64 linux-x64 linux-arm64; do deploy/package.sh "$VERSION" "$rid" out "$component"; done
+          done
+          test "$(ls out | wc -l)" -eq 6
           (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
@@ -120,6 +136,68 @@ jobs:
           connection = config["ConnectionStrings"]["DefaultConnection"]
           assert "Host=localhost" in connection and "Username=bermap" in connection, connection
           PY
+          # Collector: aynı makinedeki sunucuya kaydolmalı (token sunucu yapılandırmasından).
+          COLLECTOR_CONFIG=/etc/bermap/collector.json
+          COLLECTOR_PKG="$GITHUB_WORKSPACE/bermap-collector-$VERSION-linux-x64"
+          tar xzf "$GITHUB_WORKSPACE/bermap-collector-$VERSION-linux-x64.tar.gz" -C "$GITHUB_WORKSPACE"
+          sudo BERMAP_ENROLLMENT_TOKEN="$TOKEN" "$COLLECTOR_PKG/install.sh" --server-url http://localhost:8081 \
+            --name release-linux-collector | tee "$RUNNER_TEMP/collector-install.log"
+          if grep -qF "$TOKEN" "$RUNNER_TEMP/collector-install.log"; then echo "Token tam olarak yazdırıldı" >&2; exit 1; fi
+          test -f /opt/bermap/collector/.bermap-collector
+          test ! -e /opt/bermap/collector/appsettings.Development.json   # geliştirme token'ı paketlenmez
+          systemctl show bermap-collector -p Environment | grep -q "BERMAP_CONFIG_FILE=$COLLECTOR_CONFIG"
+          test "$(sudo stat -c '%U:%G %a' "$COLLECTOR_CONFIG")" = "root:bermap-collector 640"
+          test "$(sudo stat -c '%U %a' /var/lib/bermap/collector)" = "bermap-collector 750"
+          sudo test -s /var/lib/bermap/collector/collector-id
+          COLLECTOR_ID=$(sudo cat /var/lib/bermap/collector/collector-id)
+          collector_online() {
+            local api
+            api=$(curl -fsS -X POST http://localhost:8081/api/auth/login -H 'content-type: application/json' \
+              -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+            curl -fsS http://localhost:8081/api/collectors -H "Authorization: Bearer $api" | python3 -c '
+          import json, sys
+          collectors = [c for c in json.load(sys.stdin) if c["name"] == sys.argv[1]]
+          assert len(collectors) == 1, collectors
+          assert collectors[0]["id"] == sys.argv[2], (collectors[0]["id"], sys.argv[2])
+          assert collectors[0]["status"] == "Online", collectors[0]
+          ' release-linux-collector "$COLLECTOR_ID"
+          }
+          collector_online
+          # Elle eklenen ayar korunmalı; parametresiz yükseltme yeniden kayıt yapmaz.
+          sudo python3 - "$COLLECTOR_CONFIG" <<'PY'
+          import json, sys
+          config = json.load(open(sys.argv[1]))
+          config["Logging"] = {"LogLevel": {"BerMap": "Debug"}}
+          json.dump(config, open(sys.argv[1], "w"), indent=2)
+          PY
+          sudo "$COLLECTOR_PKG/install.sh"
+          sudo TOKEN="$TOKEN" python3 - "$COLLECTOR_CONFIG" <<'PY'
+          import json, os, sys
+          config = json.load(open(sys.argv[1]))
+          assert config["Logging"]["LogLevel"]["BerMap"] == "Debug", config
+          collector = config["BerMap"]["Collector"]
+          assert collector["EnrollmentToken"] == os.environ["TOKEN"] and collector["Name"] == "release-linux-collector", collector
+          assert config["BerMap"]["ServerUrl"] == "http://localhost:8081", config["BerMap"]
+          assert collector["Integrations"] == [], collector
+          PY
+          test "$(sudo cat /var/lib/bermap/collector/collector-id)" = "$COLLECTOR_ID"
+          # Yanlış token: kurulum kayıt olmadığını açıkça söyleyip başarısız olmalı.
+          if sudo BERMAP_ENROLLMENT_TOKEN=wrong-token BERMAP_REGISTER_TIMEOUT=20 "$COLLECTOR_PKG/install.sh" 2> "$RUNNER_TEMP/collector-wrong.log"; then
+            echo "Yanlış token ile kurulum başarılı göründü" >&2; exit 1
+          fi
+          grep -q "did not register" "$RUNNER_TEMP/collector-wrong.log"
+          sudo BERMAP_ENROLLMENT_TOKEN="$TOKEN" "$COLLECTOR_PKG/install.sh"   # aynı ad ve host: aynı kayıt
+          test "$(sudo cat /var/lib/bermap/collector/collector-id)" = "$COLLECTOR_ID"
+          # Sunucu yükseltmesi collector verisinin sahipliğini bozmamalı.
+          sudo BERMAP_DB_PASSWORD=release-test ./install.sh
+          test "$(sudo stat -c '%U' /var/lib/bermap/collector)" = bermap-collector
+          test "$(sudo stat -c '%U' /var/lib/bermap/collector/collector-id)" = bermap-collector
+          systemctl is-active --quiet bermap-collector
+          collector_online
+          sudo "$COLLECTOR_PKG/uninstall.sh"
+          if systemctl is-active --quiet bermap-collector; then echo "Collector servisi hâlâ çalışıyor" >&2; exit 1; fi
+          test ! -e /opt/bermap/collector
+          sudo test -f "$COLLECTOR_CONFIG"   # yeniden kurulum için korunur
           # Başka içerik barındıran bir dizin silinmemeli.
           mkdir -p "$RUNNER_TEMP/not-bermap" && touch "$RUNNER_TEMP/not-bermap/keep"
           if sudo ./install.sh --install-dir "$RUNNER_TEMP/not-bermap"; then echo "Yabancı dizine kurdu" >&2; exit 1; fi
@@ -136,9 +214,16 @@ jobs:
     env:
       VERSION: ${{ needs.package.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+          sparse-checkout: deploy
       - uses: actions/download-artifact@v4
         with:
           name: packages
+      - name: Collector yapılandırma birleştirme (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\repo\deploy\tests\collector-config.ps1
       - name: PostgreSQL
         shell: powershell
         run: |
@@ -185,6 +270,53 @@ jobs:
           if ($after.ConnectionStrings.DefaultConnection -ne $before.ConnectionStrings.DefaultConnection) { throw 'Connection string changed.' }
           if ($after.Kestrel.Endpoints.Default.Url -ne 'http://0.0.0.0:8081') { throw "Unexpected URL $($after.Kestrel.Endpoints.Default.Url)" }
           if (Get-NetFirewallRule -DisplayName 'BerMap Server (8080)' -ErrorAction SilentlyContinue) { throw 'Old firewall rule was kept.' }
+          # Collector: registers with the server on this machine (token from the server configuration).
+          $token = [string] $after.BerMap.Collectors.EnrollmentToken
+          $secureToken = ConvertTo-SecureString $token -AsPlainText -Force
+          Expand-Archive "$env:GITHUB_WORKSPACE\BerMap-Collector-$env:VERSION-win-x64.zip" -DestinationPath "$env:GITHUB_WORKSPACE\pkg-collector"
+          $collectorPkg = "$env:GITHUB_WORKSPACE\pkg-collector\BerMap-Collector-$env:VERSION-win-x64"
+          $collectorData = "$env:ProgramData\BerMap\Collector"
+          $collectorConfig = "$collectorData\appsettings.Production.json"
+          $collectorKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\BerMapCollector'
+          $output = & "$collectorPkg\Install-BerMapCollector.ps1" -ServerUrl http://localhost:8081 -EnrollmentToken $secureToken -Name release-windows-collector 6>&1 | Out-String
+          Write-Host $output
+          if ($output.Contains($token)) { throw 'The enrollment token was printed in full.' }
+          if (-not (Test-Path "$env:ProgramFiles\BerMap\Collector\.bermap-collector")) { throw 'Collector marker is missing.' }
+          if (Test-Path "$env:ProgramFiles\BerMap\Collector\appsettings.Development.json") { throw 'Development settings were packaged.' }
+          if ((Get-ItemProperty $collectorKey).Environment -notcontains "BERMAP_CONFIG_FILE=$collectorConfig") { throw 'BERMAP_CONFIG_FILE is not set on the collector service.' }
+          if ((Get-Service BerMapCollector).StartType -ne 'Automatic') { throw 'Collector service is not automatic.' }
+          foreach ($path in $collectorData, $collectorConfig) {
+              $acl = Get-Acl $path
+              $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+              if (-not $acl.AreAccessRulesProtected -or ($sids -join ',') -ne 'S-1-5-18,S-1-5-32-544') { throw "$path is not limited to SYSTEM and Administrators: $($sids -join ',')" }
+          }
+          $collectorId = (Get-Content "$collectorData\collector-id" -Raw).Trim()
+          function Assert-CollectorOnline {
+              $session = Invoke-RestMethod http://localhost:8081/api/auth/login -Method Post -ContentType 'application/json' -Body $body
+              $collectors = @(Invoke-RestMethod http://localhost:8081/api/collectors -Headers @{ Authorization = "Bearer $($session.token)" } |
+                  ForEach-Object { $_ } | Where-Object { $_.name -eq 'release-windows-collector' })
+              if ($collectors.Count -ne 1) { throw "Expected one collector named release-windows-collector, found $($collectors.Count)." }
+              if ($collectors[0].id -ne $collectorId) { throw "Collector id $($collectors[0].id) does not match $collectorId." }
+              if ($collectors[0].status -ne 'Online') { throw "Collector is $($collectors[0].status)." }
+          }
+          Assert-CollectorOnline
+          # A setting added by hand must survive the upgrade; an upgrade without parameters does not re-enroll.
+          $collectorBefore = Get-Content $collectorConfig -Raw | ConvertFrom-Json
+          $collectorBefore | Add-Member -NotePropertyName Logging -NotePropertyValue ([pscustomobject]@{ LogLevel = [pscustomobject]@{ BerMap = 'Debug' } })
+          $collectorBefore | ConvertTo-Json -Depth 20 | Set-Content $collectorConfig -Encoding UTF8
+          & "$collectorPkg\Install-BerMapCollector.ps1"
+          $collectorAfter = Get-Content $collectorConfig -Raw | ConvertFrom-Json
+          if ($collectorAfter.Logging.LogLevel.BerMap -ne 'Debug') { throw 'Logging was dropped by the collector upgrade.' }
+          if ($collectorAfter.BerMap.Collector.EnrollmentToken -ne $token) { throw 'Collector enrollment token changed.' }
+          if ($collectorAfter.BerMap.Collector.Name -ne 'release-windows-collector') { throw 'Collector name changed.' }
+          if ($collectorAfter.BerMap.ServerUrl -ne 'http://localhost:8081') { throw 'Collector server URL changed.' }
+          if ($null -eq $collectorAfter.BerMap.Collector.Integrations -or @($collectorAfter.BerMap.Collector.Integrations).Count -ne 0) { throw 'Collector integrations were not kept as an empty list.' }
+          if ((Get-Content "$collectorData\collector-id" -Raw).Trim() -ne $collectorId) { throw 'The collector enrolled again on a plain upgrade.' }
+          Assert-CollectorOnline
+          & "$collectorPkg\Uninstall-BerMapCollector.ps1"
+          if (Get-Service BerMapCollector -ErrorAction SilentlyContinue) { throw 'Collector service was not removed.' }
+          if (Test-Path "$env:ProgramFiles\BerMap\Collector") { throw 'Collector program directory was not removed.' }
+          if (-not (Test-Path $collectorConfig)) { throw 'Collector configuration was not kept for a reinstall.' }
           .\Uninstall-BerMapServer.ps1
           if (Get-Service BerMapServer -ErrorAction SilentlyContinue) { throw 'Service was not removed.' }
           if (Test-Path "$env:ProgramFiles\BerMap\Server") { throw 'Program directory was not removed.' }

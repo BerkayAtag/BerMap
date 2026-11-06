@@ -39,3 +39,94 @@ jobs:
         working-directory: src/BerMap.Web
       - run: npm run build
         working-directory: src/BerMap.Web
+
+  # Uçtan uca tarayıcı testleri: release paketinin aynısı (web konsolu dahil) derlenir,
+  # paketlenmiş sunucu boş bir PostgreSQL'e karşı çalıştırılır ve Playwright her konsol
+  # işlevini sentetik demo verisiyle dener. Ayrıntılar: tests/e2e/README.md
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: bermap_e2e
+          POSTGRES_PASSWORD: bermap_e2e
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U bermap_e2e" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      # Yalnız bu geçici test sunucusu için sentetik değerler.
+      BERMAP_E2E_BASE_URL: http://localhost:8080
+      BERMAP_E2E_ADMIN_PASSWORD: E2e-Admin-Pass-2026!
+      BERMAP_E2E_ENROLLMENT_TOKEN: e2e-enrollment-token-0123456789abcdef0123456789abcdef
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            src/BerMap.Web/package-lock.json
+            tests/e2e/package-lock.json
+      - name: Web konsolu
+        working-directory: src/BerMap.Web
+        run: npm ci && npm run build
+      - name: Sunucu paketi (linux-x64)
+        run: |
+          VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          PACKAGE=$(deploy/package.sh "$VERSION" linux-x64 "$RUNNER_TEMP/packages" | tail -n 1)
+          mkdir -p "$RUNNER_TEMP/server"
+          tar -xzf "$PACKAGE" -C "$RUNNER_TEMP/server" --strip-components=1
+          test -x "$RUNNER_TEMP/server/server/BerMap.Api"
+          test -f "$RUNNER_TEMP/server/server/wwwroot/index.html"
+          test ! -e "$RUNNER_TEMP/server/server/appsettings.Development.json"   # geliştirme ayarları paketlenmez
+      - name: Paketlenmiş sunucuyu başlat
+        run: |
+          cat > "$RUNNER_TEMP/bermap-e2e.json" <<JSON
+          {
+            "ConnectionStrings": {
+              "DefaultConnection": "Host=localhost;Port=5432;Database=bermap_e2e;Username=bermap_e2e;Password=bermap_e2e"
+            },
+            "Kestrel": { "Endpoints": { "Default": { "Url": "$BERMAP_E2E_BASE_URL" } } },
+            "BerMap": {
+              "CredentialVault": { "Directory": "$RUNNER_TEMP/bermap-vault" },
+              "Bootstrap": { "AdminPassword": "$BERMAP_E2E_ADMIN_PASSWORD" },
+              "Collectors": { "EnrollmentToken": "$BERMAP_E2E_ENROLLMENT_TOKEN" }
+            }
+          }
+          JSON
+          cd "$RUNNER_TEMP/server/server"
+          BERMAP_CONFIG_FILE="$RUNNER_TEMP/bermap-e2e.json" nohup ./BerMap.Api > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fsS "$BERMAP_E2E_BASE_URL/healthz/ready" > /dev/null 2>&1; then echo "Sunucu hazır (${i}s)"; exit 0; fi
+            sleep 1
+          done
+          echo "Sunucu 90 saniyede hazır olmadı" >&2
+          cat "$RUNNER_TEMP/server.log" >&2
+          exit 1
+      - name: Playwright
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npm run typecheck
+          npx playwright install --with-deps chromium ffmpeg
+          npx playwright test
+      - name: Sunucu günlüğü
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/server.log" || true
+          mkdir -p tests/e2e/test-results && cp "$RUNNER_TEMP/server.log" tests/e2e/test-results/ || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-report
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 14

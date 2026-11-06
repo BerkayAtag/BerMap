@@ -1,0 +1,17 @@
+{
+  "name": "bermap-e2e",
+  "private": true,
+  "version": "0.3.0",
+  "description": "End-to-end browser tests for the BerMap web console against a real server and PostgreSQL.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "22.19.1",
+    "typescript": "5.8.3"
+  }
+}

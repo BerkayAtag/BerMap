@@ -1,6 +1,6 @@
 import React, { useCallback, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -19,6 +19,7 @@ import {
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Workflow,
   X,
 } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -241,6 +242,7 @@ export const SnapshotsPage: React.FC = () => {
     [setSearchParams],
   );
   const [isDiffOpen, setIsDiffOpen] = useState(false);
+  const navigate = useNavigate();
   const [compareA, setCompareA] = useState('');
   const [compareB, setCompareB] = useState('');
   const [diff, setDiff] = useState<SnapshotDiff | null>(null);
@@ -624,6 +626,16 @@ export const SnapshotsPage: React.FC = () => {
                     <ShieldCheck className="w-3.5 h-3.5" />
                   )}
                   {isTr ? 'Doğrula' : 'Verify'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => navigate(`/simulation?snapshot=${encodeURIComponent(snapshot.id)}`)}
+                  title={isTr ? 'Bu snapshot üzerinde simülasyon çalıştır' : 'Run a simulation against this snapshot'}
+                >
+                  <Workflow className="w-3.5 h-3.5" />
+                  {isTr ? 'Simüle et' : 'Simulate'}
                 </Button>
               </div>
             </Card>

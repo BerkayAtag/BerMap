@@ -38,8 +38,14 @@ elif [[ -d "$INSTALL_DIR" ]]; then
 fi
 
 if $REMOVE_DATA; then
-  rm -rf "$DATA_DIR" "$CONFIG_DIR"
-  echo "Removed $DATA_DIR and $CONFIG_DIR. The PostgreSQL database was not touched."
+  # A collector on the same host keeps its data ($DATA_DIR/collector) and configuration
+  # ($CONFIG_DIR/collector*); its own uninstall.sh removes them.
+  for dir in "$DATA_DIR" "$CONFIG_DIR"; do
+    [[ -d "$dir" ]] || continue
+    find "$dir" -mindepth 1 -maxdepth 1 ! -name 'collector*' -exec rm -rf {} +
+    rmdir "$dir" 2>/dev/null || echo "Kept the BerMap collector files in $dir."
+  done
+  echo "Removed the server data in $DATA_DIR and $CONFIG_DIR. The PostgreSQL database was not touched."
 else
   echo "Kept $DATA_DIR (credential vault), $CONFIG_DIR (configuration) and the PostgreSQL database."
 fi

@@ -8,8 +8,9 @@ using BerMap.Collector.Services;
 namespace BerMap.Collector;
 
 /// <summary>
-/// Collector main loop: register → heartbeat → drain the offline queue. Running discovery
-/// adapters inside the collector is not part of this service yet. Failures back off
+/// Collector main loop: register → heartbeat → drain the offline queue. Discovery runs
+/// are started by <see cref="CollectorDiscoveryScheduler"/>; their batches reach the
+/// offline queue drained here when the server is unreachable. Failures back off
 /// exponentially and never escape the loop, so the host keeps running while the server
 /// is unreachable.
 /// </summary>

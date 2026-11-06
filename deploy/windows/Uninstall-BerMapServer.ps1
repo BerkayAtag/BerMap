@@ -54,7 +54,16 @@ if (Test-Path $InstallDir) {
 }
 
 if ($RemoveData) {
-    if (Test-Path $DataDir) { Remove-Item -Path $DataDir -Recurse -Force }
+    if (Test-Path $DataDir) {
+        # A collector on the same machine keeps its data in $DataDir\Collector by default;
+        # Uninstall-BerMapCollector.ps1 removes it.
+        Get-ChildItem -Path $DataDir -Force | Where-Object { $_.Name -ne 'Collector' } | Remove-Item -Recurse -Force
+        if (Get-ChildItem -Path $DataDir -Force | Select-Object -First 1) {
+            Write-Host "Kept the BerMap collector data in $(Join-Path $DataDir 'Collector')."
+        } else {
+            Remove-Item -Path $DataDir -Force
+        }
+    }
     if ($configPath -and (Test-Path $configPath)) { Remove-Item -Path $configPath -Force }
     Write-Host "Removed $DataDir (configuration, credential vault). The PostgreSQL database was not touched."
 } else {

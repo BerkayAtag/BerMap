@@ -12,7 +12,8 @@ namespace BerMap.Simulation;
 
 /// <summary>
 /// Deterministic impact-analysis engine. Every result is derived from the real
-/// topology graph served by IGraphService: a scenario run NEVER fabricates
+/// topology graph served by IGraphService — the live graph, or the frozen graph
+/// of a snapshot when the request names one: a scenario run NEVER fabricates
 /// demo nodes, fixed risk scores or hardcoded capacity numbers. When the data
 /// required for a metric is absent (e.g. vCenter metrics were not collected),
 /// the metric is reported as unknown rather than estimated.
@@ -73,15 +74,41 @@ public class SimulationEngine : ISimulationEngine
         if (request.TargetNodeId is not { } targetNodeId || targetNodeId == Guid.Empty)
             throw new IntegrationValidationException(InvalidSimulationCode, "targetNodeId is required.");
 
+        if (request.SnapshotId == Guid.Empty)
+            throw new IntegrationValidationException(InvalidSimulationCode,
+                "snapshotId must be a snapshot id; omit it to simulate on the live graph.");
+
         var scenario = NormalizeScenario(request.ScenarioType);
 
-        var fetched = _graphService is IImpactGraphSource impactSource
-            ? await impactSource.GetImpactGraphAsync(targetNodeId, depth: 3, cancellationToken)
-            : await _graphService.GetTopologyGraphAsync(targetNodeId, depth: 3, cancellationToken);
+        // The basis: the live graph, or the frozen graph of one snapshot. Both
+        // go through the same impact walk and the same stale filter below.
+        SnapshotImpactGraph? snapshot = null;
+        GraphQueryResultDto fetched;
+        if (request.SnapshotId is { } snapshotId)
+        {
+            if (_graphService is not IImpactGraphSource snapshotSource)
+                throw new IntegrationValidationException(InvalidSimulationCode,
+                    "This server cannot read snapshot graphs; omit snapshotId to simulate on the live graph.");
+
+            snapshot = await snapshotSource.GetSnapshotImpactGraphAsync(snapshotId, targetNodeId, depth: 3, cancellationToken)
+                ?? throw new SimulationNotFoundException(SimulationNotFoundException.SnapshotNotFoundCode,
+                    $"Snapshot {snapshotId} was not found.");
+            fetched = snapshot.Graph;
+        }
+        else
+        {
+            fetched = _graphService is IImpactGraphSource impactSource
+                ? await impactSource.GetImpactGraphAsync(targetNodeId, depth: 3, cancellationToken)
+                : await _graphService.GetTopologyGraphAsync(targetNodeId, depth: 3, cancellationToken);
+        }
+
         var graph = LiveGraph(fetched, targetNodeId);
         var targetNode = graph.Nodes.FirstOrDefault(n => n.Id == targetNodeId)
-            ?? throw new KeyNotFoundException(
-                $"Target node {targetNodeId} was not found in the inventory topology graph. Run a discovery first.");
+            ?? throw (snapshot == null
+                ? new KeyNotFoundException(
+                    $"Target node {targetNodeId} was not found in the inventory topology graph. Run a discovery first.")
+                : new SimulationNotFoundException(SimulationNotFoundException.NotInSnapshotCode,
+                    $"Target node {targetNodeId} is not in snapshot '{snapshot.SnapshotName}'; it was discovered after the snapshot was captured or had been removed before it."));
 
         var validTypes = ValidTargetTypes[scenario];
         if (!MatchesAny(targetNode.NodeType, validTypes))
@@ -95,6 +122,9 @@ public class SimulationEngine : ISimulationEngine
             TargetNodeName = targetNode.Name,
             ScenarioType = scenario,
             GraphTruncated = graph.IsTruncated,
+            SnapshotId = snapshot?.SnapshotId,
+            SnapshotName = snapshot?.SnapshotName,
+            SnapshotCreatedAt = snapshot?.SnapshotCreatedAt,
         };
 
         switch (scenario)

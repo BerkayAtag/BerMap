@@ -183,8 +183,13 @@ public class CollectorsController : ControllerBase
         foreach (var relationship in batch.Relationships)
             relationship.Properties ??= new();
 
-        if (batch.Nodes == null || batch.Nodes.Count == 0)
-            return BadRequest(new { message = "Discovery batch contains no nodes." });
+        // A run that collected nothing is still reported: as a final batch with
+        // Success=false and no nodes, which fails the job (and the integration
+        // health) without touching the inventory. Any other batch needs nodes.
+        batch.Nodes ??= new();
+        var isFailureReport = final && !batch.Success;
+        if (batch.Nodes.Count == 0 && !isFailureReport)
+            return BadRequest(new { message = "Discovery batch contains no nodes. Only a final batch reporting a failure (success=false) may be empty." });
 
         if (!batch.IntegrationId.HasValue || batch.IntegrationId.Value == Guid.Empty)
         {
@@ -271,8 +276,10 @@ public class CollectorsController : ControllerBase
         IngestionResult ingestion;
         try
         {
-            ingestion = await _ingestionService.IngestAsync(
-                integrationId, job.Id, batch, isCompleteSnapshot, CancellationToken.None);
+            ingestion = batch.Nodes.Count == 0 && batch.Relationships.Count == 0
+                ? new IngestionResult()
+                : await _ingestionService.IngestAsync(
+                    integrationId, job.Id, batch, isCompleteSnapshot, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -301,10 +308,19 @@ public class CollectorsController : ControllerBase
 
         if (final)
         {
-            job.Status = errors.Count == 0 ? DiscoveryJobStatus.Completed : DiscoveryJobStatus.PartialSuccess;
+            // Same outcome rules as server-side discovery: clean → Completed,
+            // errors with data → PartialSuccess, errors and nothing collected
+            // over the whole job → Failed.
+            var nothingCollected = job.EntitiesDiscovered == 0 && job.RelationshipsDiscovered == 0;
+            var failed = errors.Count > 0 && nothingCollected;
+            job.Status = errors.Count == 0
+                ? DiscoveryJobStatus.Completed
+                : failed ? DiscoveryJobStatus.Failed : DiscoveryJobStatus.PartialSuccess;
             job.ProgressPercent = 100;
-            job.CurrentPhase = "Completed";
-            job.CurrentMessage = errors.Count == 0 ? "Collector snapshot ingested." : "Collector snapshot ingested with errors.";
+            job.CurrentPhase = failed ? "Failed" : "Completed";
+            job.CurrentMessage = errors.Count == 0
+                ? "Collector snapshot ingested."
+                : failed ? errors[0] : "Collector snapshot ingested with errors.";
             job.CompletedAt = DateTime.UtcNow;
             job.DurationMs = (long)(job.CompletedAt.Value - job.StartedAt).TotalMilliseconds;
 
@@ -312,7 +328,8 @@ public class CollectorsController : ControllerBase
             // server-side discovery does, otherwise they stay "Inactive" forever.
             var integration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, CancellationToken.None);
             integration.Status = IntegrationStatusRules.AfterRun(
-                integration.IsEnabled, errors.Count == 0 ? IntegrationStatus.Active : IntegrationStatus.Degraded);
+                integration.IsEnabled,
+                errors.Count == 0 ? IntegrationStatus.Active : failed ? IntegrationStatus.Error : IntegrationStatus.Degraded);
             integration.LastError = errors.FirstOrDefault() ?? string.Empty;
             integration.LastErrorAt = errors.Count > 0 ? DateTime.UtcNow : null;
             integration.LastJobId = job.Id;

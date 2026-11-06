@@ -7,6 +7,7 @@ import {
   scenarioLabel,
   type ScenarioType,
 } from './scenarios';
+import { basisFromResult, reportBasisRows } from './simulationBasis';
 
 /*
  * "Değişiklik risk raporu" — a self-contained change-risk report built from one
@@ -104,7 +105,8 @@ function buildModel(input: RiskReportInput): ReportModel {
       ...(target.fqdn ? ([['FQDN', target.fqdn]] as [string, string][]) : []),
       [isTr ? 'Hedef kimliği' : 'Target id', target.id],
       [isTr ? 'Senaryo' : 'Scenario', `${scenarioLabel(scenario, isTr)} (${scenario})`],
-      [isTr ? 'Simülasyon tabanı' : 'Simulation basis', isTr ? 'Canlı graf (güncel envanter)' : 'Live graph (current inventory)'],
+      // The basis the engine actually ran on (live graph or a snapshot's name and date).
+      ...reportBasisRows(basisFromResult(result), isTr),
     ],
     riskScore: result.riskScore,
     riskText: `${riskLevelLabel(level, isTr)} — ${result.riskScore}/100`,

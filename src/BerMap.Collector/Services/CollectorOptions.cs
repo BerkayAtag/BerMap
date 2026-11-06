@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Microsoft.Extensions.Configuration;
 
 namespace BerMap.Collector.Services;
@@ -12,7 +13,11 @@ namespace BerMap.Collector.Services;
 ///   BerMap:Collector:DataDirectory       writable folder for the collector id and offline queue
 ///   BerMap:Collector:QueueMaxDiskMb      disk quota for the offline queue
 ///   BerMap:Collector:Name                display name used at registration (defaults to the host name)
-///   BerMap:Collector:SupportedAdapters   adapter types advertised at registration
+///   BerMap:Collector:SupportedAdapters   adapter types advertised at registration, in addition
+///                                        to the adapter types of the configured integrations
+///   BerMap:Collector:BatchSize           nodes per submit-batch request (default 500)
+///   BerMap:Collector:Integrations        integrations discovered by this collector, see
+///                                        <see cref="CollectorIntegration"/>
 /// </summary>
 public sealed class CollectorOptions
 {
@@ -25,9 +30,26 @@ public sealed class CollectorOptions
     public string Name { get; set; } = Environment.MachineName;
     public List<string> SupportedAdapters { get; set; } = new();
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public int BatchSize { get; set; } = DefaultBatchSize;
+
+    public const int DefaultBatchSize = 500;
+    public const int MaxBatchSize = 10000;
 
     public string OfflineQueueDirectory => Path.Combine(DataDirectory, "offline_queue");
     public string CollectorIdFile => Path.Combine(DataDirectory, "collector-id");
+
+    /// <summary>
+    /// Adds the adapter types of the configured integrations to the advertised
+    /// adapters (distinct, case-insensitive, explicit entries first).
+    /// </summary>
+    public void AdvertiseAdapters(IEnumerable<string> adapterTypes)
+    {
+        foreach (var adapterType in adapterTypes)
+        {
+            if (!SupportedAdapters.Contains(adapterType, StringComparer.OrdinalIgnoreCase))
+                SupportedAdapters.Add(adapterType);
+        }
+    }
 
     public static CollectorOptions FromConfiguration(IConfiguration configuration)
     {
@@ -39,6 +61,11 @@ public sealed class CollectorOptions
         if (string.IsNullOrWhiteSpace(options.Name))
             options.Name = Environment.MachineName;
         options.QueueMaxDiskMb = Math.Max(1, options.QueueMaxDiskMb);
+        options.BatchSize = options.BatchSize <= 0 ? DefaultBatchSize : Math.Min(options.BatchSize, MaxBatchSize);
+        options.SupportedAdapters = (options.SupportedAdapters ?? new List<string>())
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Select(a => a.Trim())
+            .ToList();
         options.DataDirectory = ResolveDataDirectory(options.DataDirectory);
         return options;
     }

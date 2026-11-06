@@ -33,8 +33,30 @@ public interface ICollectorClient
     /// </summary>
     Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Sends batch <paramref name="sequence"/> (0-based) of a snapshot, or buffers it. A later
+    /// batch (sequence &gt; 0) is only ever delivered to the job its first batch opened: when
+    /// that job is unknown (the first batch was rejected) it is rejected locally, because on
+    /// its own it would open a new job and a final batch would then mark the rest of the
+    /// integration's inventory stale.
+    /// </summary>
+    Task<BatchDelivery> SubmitSnapshotBatchAsync(DiscoveryResult batch, Guid snapshotId, int sequence, bool final, CancellationToken cancellationToken = default);
+
     /// <summary>Delivers buffered batches in order. Returns false when a delivery failed and should be retried later.</summary>
     Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>What happened to a submitted batch.</summary>
+public enum BatchDelivery
+{
+    /// <summary>The server accepted it.</summary>
+    Delivered,
+
+    /// <summary>Kept in the offline queue; it is delivered in order later.</summary>
+    Buffered,
+
+    /// <summary>The server (or the snapshot protocol) refused it for good; it was not kept.</summary>
+    Rejected
 }
 
 /// <summary>Offline queue payload: the batch plus the submit-batch query parameters.</summary>
@@ -53,11 +75,20 @@ public sealed class QueuedBatch
     public Guid? SnapshotId { get; set; }
 
     public bool Final { get; set; }
+
+    /// <summary>
+    /// 0-based position inside the snapshot; null for batches queued before
+    /// sequences existed (or sent through the sequence-less overload).
+    /// </summary>
+    public int? Sequence { get; set; }
 }
 
 public class CollectorClient : ICollectorClient
 {
     public const string BatchQueue = "discovery_batches";
+
+    /// <summary>Open snapshots older than this are forgotten (the server has failed their jobs long ago).</summary>
+    private static readonly TimeSpan SnapshotJobRetention = TimeSpan.FromDays(7);
 
     private readonly HttpClient _httpClient;
     private readonly IOfflineQueue _offlineQueue;
@@ -69,8 +100,10 @@ public class CollectorClient : ICollectorClient
     private Guid? _collectorId;
 
     // Server job id of each open multi-batch snapshot, learned from the
-    // response to its first delivered batch.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, Guid> _snapshotJobs = new();
+    // response to its first delivered batch. Persisted, so batches still in
+    // the offline queue reach the right job after a service restart.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SnapshotJob> _snapshotJobs = new();
+    private readonly object _snapshotJobsFileLock = new();
 
     // CPU sampling state: process CPU time and wall clock at the previous heartbeat.
     private TimeSpan? _lastCpuTime;
@@ -93,6 +126,7 @@ public class CollectorClient : ICollectorClient
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0]
             ?? "1.0.0";
         _collectorId = LoadPersistedId();
+        LoadSnapshotJobs();
     }
 
     public bool IsRegistered => _collectorId.HasValue;
@@ -201,16 +235,22 @@ public class CollectorClient : ICollectorClient
         }
     }
 
-    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default)
+    public async Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default) =>
+        await SubmitAsync(new QueuedBatch { Batch = batch, SnapshotId = snapshotId, Final = final }, cancellationToken) == BatchDelivery.Delivered;
+
+    public Task<BatchDelivery> SubmitSnapshotBatchAsync(DiscoveryResult batch, Guid snapshotId, int sequence, bool final, CancellationToken cancellationToken = default)
     {
-        var queued = new QueuedBatch { Batch = batch, SnapshotId = snapshotId, Final = final };
+        ArgumentOutOfRangeException.ThrowIfNegative(sequence);
+        return SubmitAsync(new QueuedBatch { Batch = batch, SnapshotId = snapshotId, Final = final, Sequence = sequence }, cancellationToken);
+    }
+
+    private async Task<BatchDelivery> SubmitAsync(QueuedBatch queued, CancellationToken cancellationToken)
+    {
+        var batch = queued.Batch;
 
         // Never overtake buffered batches: a later batch must not be ingested before an earlier one.
         if (_offlineQueue.GetQueueDepth(BatchQueue) > 0)
-        {
-            await BufferAsync(queued, "older batches are still buffered");
-            return false;
-        }
+            return await BufferAsync(queued, "older batches are still buffered");
 
         DeliveryOutcome outcome;
         try
@@ -227,13 +267,12 @@ public class CollectorClient : ICollectorClient
         {
             case DeliveryOutcome.Accepted:
                 _logger.LogInformation("Discovered batch with {NodeCount} nodes submitted successfully", batch.Nodes.Count);
-                return true;
+                return BatchDelivery.Delivered;
             case DeliveryOutcome.Rejected:
                 _logger.LogError("Server permanently rejected a discovery batch with {NodeCount} nodes; it was not buffered.", batch.Nodes.Count);
-                return false;
+                return BatchDelivery.Rejected;
             default:
-                await BufferAsync(queued, "server unavailable");
-                return false;
+                return await BufferAsync(queued, "server unavailable");
         }
     }
 
@@ -301,7 +340,16 @@ public class CollectorClient : ICollectorClient
         var jobId = queued.JobId;
         if (jobId == null && queued.SnapshotId is { } pendingSnapshot &&
             _snapshotJobs.TryGetValue(pendingSnapshot, out var knownJob))
-            jobId = knownJob;
+            jobId = knownJob.JobId;
+
+        if (jobId == null && queued.Sequence > 0)
+        {
+            // The first batch never opened a job (it was rejected or dead-lettered).
+            _logger.LogError(
+                "Batch {Sequence} of snapshot {SnapshotId} has no server job to join; it is dropped. The next discovery run sends a complete snapshot.",
+                queued.Sequence, queued.SnapshotId);
+            return DeliveryOutcome.Rejected;
+        }
 
         var query = $"?final={(queued.Final ? "true" : "false")}";
         if (jobId.HasValue)
@@ -314,11 +362,13 @@ public class CollectorClient : ICollectorClient
             {
                 if (queued.Final)
                 {
-                    _snapshotJobs.TryRemove(snapshotId, out _);
+                    if (_snapshotJobs.TryRemove(snapshotId, out _))
+                        SaveSnapshotJobs();
                 }
                 else if (jobId == null && await ReadJobIdAsync(response, cancellationToken) is { } openedJob)
                 {
-                    _snapshotJobs[snapshotId] = openedJob;
+                    _snapshotJobs[snapshotId] = new SnapshotJob(openedJob, DateTime.UtcNow);
+                    SaveSnapshotJobs();
                 }
             }
 
@@ -350,14 +400,65 @@ public class CollectorClient : ICollectorClient
         }
     }
 
-    private async Task BufferAsync(QueuedBatch queued, string reason)
+    private async Task<BatchDelivery> BufferAsync(QueuedBatch queued, string reason)
     {
         // Buffering is local bookkeeping and must not be skipped because of cancellation.
         var accepted = await _offlineQueue.EnqueueAsync(BatchQueue, queued, CancellationToken.None);
         if (accepted)
+        {
             _logger.LogWarning("Discovery batch buffered to local offline queue ({Reason}).", reason);
-        else
-            _logger.LogError("Discovery batch dropped: offline queue disk quota exceeded.");
+            return BatchDelivery.Buffered;
+        }
+
+        _logger.LogError("Discovery batch dropped: offline queue disk quota exceeded.");
+        return BatchDelivery.Rejected;
+    }
+
+    // ---------------------------------------------------------------------
+    // Open snapshot → server job map
+    // ---------------------------------------------------------------------
+
+    private sealed record SnapshotJob(Guid JobId, DateTime RecordedAt);
+
+    private string SnapshotJobsFile => Path.Combine(_options.DataDirectory, "snapshot-jobs.json");
+
+    private void LoadSnapshotJobs()
+    {
+        try
+        {
+            if (!File.Exists(SnapshotJobsFile))
+                return;
+            var saved = JsonSerializer.Deserialize<Dictionary<Guid, SnapshotJob>>(File.ReadAllText(SnapshotJobsFile));
+            var cutoff = DateTime.UtcNow - SnapshotJobRetention;
+            foreach (var (snapshotId, job) in saved ?? new())
+            {
+                if (job != null && job.RecordedAt >= cutoff)
+                    _snapshotJobs[snapshotId] = job;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _logger.LogWarning("Could not read the open snapshot list {File}: {Message}", SnapshotJobsFile, ex.Message);
+        }
+    }
+
+    private void SaveSnapshotJobs()
+    {
+        try
+        {
+            lock (_snapshotJobsFileLock)
+            {
+                Directory.CreateDirectory(_options.DataDirectory);
+                var temp = SnapshotJobsFile + ".tmp";
+                File.WriteAllText(temp, JsonSerializer.Serialize(_snapshotJobs.ToDictionary(p => p.Key, p => p.Value)));
+                File.Move(temp, SnapshotJobsFile, overwrite: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The in-memory map still serves this process; only a restart would lose it.
+            _logger.LogWarning("Could not save the open snapshot list {File}: {Message}", SnapshotJobsFile, ex.Message);
+        }
     }
 
     // ---------------------------------------------------------------------

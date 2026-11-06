@@ -83,7 +83,8 @@ public class EntityReconciliationService : IEntityReconciliationService
             var linked = existingList.FirstOrDefault(n => n.Id == sourceLinkedNodeId.Value);
             if (linked != null)
             {
-                var changed = MergeDiscoveredMetadata(linked, discovered, "Matched via stable source link", "ExactSourceIdentity");
+                var changed = MergeDiscoveredMetadata(linked, discovered, "Matched via stable source link", "ExactSourceIdentity",
+                    refreshFromSameSource: true);
                 return Result(
                     ReconciliationConfidence.ExactSourceIdentity,
                     linked,
@@ -489,11 +490,21 @@ public class EntityReconciliationService : IEntityReconciliationService
         return node;
     }
 
+    /// <param name="refreshFromSameSource">
+    /// True when the source is re-reporting its own object (matched through its
+    /// stable source link). Its reported values are then current and replace the
+    /// stored ones: metrics such as CpuUsagePercent or PowerState, and — while
+    /// the node has no other source — a renamed or re-addressed object's name,
+    /// FQDN, IP and MAC. Merged multi-source nodes keep their identity fields so
+    /// two sources that spell a name differently do not overwrite each other on
+    /// every run. Any other match only fills blanks.
+    /// </param>
     private static bool MergeDiscoveredMetadata(
         InfrastructureNode existing,
         DiscoveredNodeContract discovered,
         string evidence,
-        string confidence)
+        string confidence,
+        bool refreshFromSameSource = false)
     {
         var before = SnapshotComparable(existing);
 
@@ -501,17 +512,23 @@ public class EntityReconciliationService : IEntityReconciliationService
         existing.IsStale = false;
         existing.StaleSince = null;
 
-        if (string.IsNullOrWhiteSpace(existing.Name) && !string.IsNullOrWhiteSpace(discovered.Name))
-            existing.Name = discovered.Name;
+        var reportingSource = ResolveSourceName(discovered);
+        var existingSources = existing.DiscoverySource
+            .Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var refreshIdentity = refreshFromSameSource &&
+                              (existingSources.Length == 0 ||
+                               (existingSources.Length == 1 &&
+                                existingSources[0].Equals(reportingSource, StringComparison.OrdinalIgnoreCase)));
 
-        if (string.IsNullOrWhiteSpace(existing.FQDN) && !string.IsNullOrWhiteSpace(discovered.FQDN))
-            existing.FQDN = discovered.FQDN;
+        string? Merge(string? current, string? reported) =>
+            !string.IsNullOrWhiteSpace(reported) && (refreshIdentity || string.IsNullOrWhiteSpace(current))
+                ? reported
+                : current;
 
-        if (string.IsNullOrWhiteSpace(existing.IPAddress) && !string.IsNullOrWhiteSpace(discovered.IPAddress))
-            existing.IPAddress = discovered.IPAddress;
-
-        if (string.IsNullOrWhiteSpace(existing.MacAddress) && !string.IsNullOrWhiteSpace(discovered.MacAddress))
-            existing.MacAddress = discovered.MacAddress;
+        existing.Name = Merge(existing.Name, discovered.Name) ?? string.Empty;
+        existing.FQDN = Merge(existing.FQDN, discovered.FQDN) ?? string.Empty;
+        existing.IPAddress = Merge(existing.IPAddress, discovered.IPAddress);
+        existing.MacAddress = Merge(existing.MacAddress, discovered.MacAddress);
 
         if (string.IsNullOrWhiteSpace(existing.BiosUuid) && !string.IsNullOrWhiteSpace(discovered.BiosUuid))
             existing.BiosUuid = discovered.BiosUuid;
@@ -541,7 +558,7 @@ public class EntityReconciliationService : IEntityReconciliationService
                 : $"{existing.DiscoverySource} + {sourceName}";
         }
 
-        MergeProperties(existing, discovered, evidence, confidence);
+        MergeProperties(existing, discovered, evidence, confidence, refreshFromSameSource);
         return SnapshotComparable(existing) != before;
     }
 
@@ -549,7 +566,8 @@ public class EntityReconciliationService : IEntityReconciliationService
         InfrastructureNode node,
         DiscoveredNodeContract discovered,
         string evidence,
-        string confidence)
+        string confidence,
+        bool refreshFromSameSource)
     {
         JsonObject props;
         try
@@ -567,10 +585,10 @@ public class EntityReconciliationService : IEntityReconciliationService
             if (string.IsNullOrWhiteSpace(key))
                 continue;
 
-            // Source-owned fields are refreshed; other metadata is only added when absent.
-            if (key.StartsWith("_", StringComparison.Ordinal))
-                props[key] = value;
-            else if (!props.ContainsKey(key))
+            // A source re-reporting its own object refreshes every value it
+            // reports (live metrics must not freeze at the first discovery);
+            // a match from another source only adds what is missing.
+            if (refreshFromSameSource || key.StartsWith("_", StringComparison.Ordinal) || !props.ContainsKey(key))
                 props[key] = value;
         }
 

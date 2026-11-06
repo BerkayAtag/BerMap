@@ -9,10 +9,17 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.13" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.13" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.14" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\BerMap.Contracts\BerMap.Contracts.csproj" />
+    <!-- CronSchedule: the collector evaluates schedules exactly like the server. -->
+    <ProjectReference Include="..\BerMap.Application\BerMap.Application.csproj" />
+    <!-- Discovery adapters run in-process, as in the server's DiscoveryJobRunner. -->
+    <ProjectReference Include="..\BerMap.Integrations\BerMap.Integrations.ActiveDirectory\BerMap.Integrations.ActiveDirectory.csproj" />
+    <ProjectReference Include="..\BerMap.Integrations\BerMap.Integrations.VMware\BerMap.Integrations.VMware.csproj" />
   </ItemGroup>
 </Project>
