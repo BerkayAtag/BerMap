@@ -11,13 +11,20 @@
 # the database password). Settings added by hand are kept.
 set -euo pipefail
 
-INSTALL_DIR=/opt/bermap/server
+DEFAULT_INSTALL_DIR=/opt/bermap/server
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 DATA_DIR=/var/lib/bermap
 CONFIG_DIR=/etc/bermap
 SERVICE=bermap-server
 UNIT_FILE="/etc/systemd/system/$SERVICE.service"
 # Written into the install directory; only a directory carrying it is ever cleared.
+# It reads "created" when this script created the directory (uninstall removes it) and
+# "existing" for the empty default directory found in place (uninstall empties it).
 MARKER=.bermap-server
+# Identifies the server's data directory (vault), which a collector never uses as its own.
+DATA_MARKER=.bermap-server-data
+# Seconds to wait for the server to report ready.
+READY_TIMEOUT="${BERMAP_READY_TIMEOUT:-180}"
 # Empty means "not given": an upgrade keeps the configured value.
 PORT=""
 DB_HOST=""
@@ -87,13 +94,23 @@ if $overlap; then
   exit 2
 fi
 
-# The install directory is cleared on every upgrade: refuse anything that is not
-# empty and was not created by this script (for example --install-dir /opt). The
-# directory the installed unit runs from counts as created by this script.
-if [[ -d "$INSTALL_DIR" && ! -f "$INSTALL_DIR/$MARKER" && "$INSTALL_DIR" != "$UNIT_INSTALL_DIR" \
-      && -n "$(ls -A "$INSTALL_DIR")" ]]; then
-  echo "$INSTALL_DIR is not empty and is not a BerMap server directory ($MARKER is missing)." >&2
-  echo "Choose a new or empty directory with --install-dir, for example $INSTALL_DIR/bermap-server." >&2
+# The install directory is cleared on every upgrade and removed by uninstall.sh: only a
+# directory this script creates, one it installed into before (marker), the one the
+# installed unit runs from, or the empty default directory is used. Anything else (for
+# example --install-dir /opt, even when empty) is refused.
+if [[ ! -e "$INSTALL_DIR" ]]; then
+  INSTALL_DIR_STATE=created
+elif [[ -f "$INSTALL_DIR/$MARKER" ]]; then
+  INSTALL_DIR_STATE=installed
+elif [[ "$INSTALL_DIR" == "$UNIT_INSTALL_DIR" ]]; then
+  # Installed into before without completing: a directory this script creates is marked at
+  # once, so this one was found in place.
+  INSTALL_DIR_STATE=existing
+elif [[ "$INSTALL_DIR" == "$DEFAULT_INSTALL_DIR" && -d "$INSTALL_DIR" && -z "$(ls -A "$INSTALL_DIR")" ]]; then
+  INSTALL_DIR_STATE=existing
+else
+  echo "$INSTALL_DIR already exists and is not a BerMap server directory ($MARKER is missing)." >&2
+  echo "Choose a directory that does not exist yet with --install-dir (it is created), for example $INSTALL_DIR/bermap-server." >&2
   exit 1
 fi
 
@@ -265,12 +282,15 @@ fi
 
 echo "==> Copying server files to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-touch "$INSTALL_DIR/$MARKER"
+# A directory this script created is marked at once: it is BerMap's whatever happens next.
+# The empty default directory found in place is marked only after a successful install.
+[[ "$INSTALL_DIR_STATE" != created ]] || echo created > "$INSTALL_DIR/$MARKER"
 find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name "$MARKER" -exec rm -rf {} +
 cp -a "$PACKAGE_DIR/server/." "$INSTALL_DIR/"
 chown -R root:root "$INSTALL_DIR"
 
 mkdir -p "$DATA_DIR/vault"
+[[ -f "$DATA_DIR/$DATA_MARKER" ]] || echo "BerMap server data directory (credential vault)" > "$DATA_DIR/$DATA_MARKER"
 # The collector keeps its data in $DATA_DIR/collector under its own user (KURULUM-COLLECTOR.md).
 find "$DATA_DIR" -path "$DATA_DIR/collector" -prune -o -exec chown bermap:bermap {} +
 chmod 700 "$DATA_DIR/vault"
@@ -283,9 +303,10 @@ systemctl enable "$SERVICE" >/dev/null
 systemctl start "$SERVICE"
 
 echo "==> Waiting for $BASE_URL/healthz/ready"
-for _ in $(seq 1 90); do
+for _ in $(seq 1 $((READY_TIMEOUT / 2))); do
   # -k: a certificate added by hand is issued for the server name, not localhost.
   if curl -fsSk "$BASE_URL/healthz/ready" >/dev/null 2>&1; then
+    [[ "$INSTALL_DIR_STATE" != existing ]] || echo existing > "$INSTALL_DIR/$MARKER"
     echo
     echo "BerMap is running: ${BASE_URL/localhost/$(hostname -f 2>/dev/null || hostname)}"
     if [[ -f "$DATA_DIR/vault/initial-admin-password.txt" ]]; then
@@ -302,5 +323,5 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 
-echo "BerMap did not become ready. See: journalctl -u $SERVICE -n 100" >&2
+echo "BerMap did not become ready within $READY_TIMEOUT seconds. See: journalctl -u $SERVICE -n 100" >&2
 exit 1

@@ -1,6 +1,7 @@
-import React, { useEffect, useId } from 'react';
+import React, { useEffect, useId, useRef } from 'react';
 import { X } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 interface DialogShellProps {
   title: string;
@@ -24,6 +25,8 @@ export const DialogShell: React.FC<DialogShellProps> = ({
   footer,
 }) => {
   const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -35,6 +38,7 @@ export const DialogShell: React.FC<DialogShellProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-xs bm-fade-in"
       role="dialog"
       aria-modal="true"
@@ -53,6 +57,7 @@ export const DialogShell: React.FC<DialogShellProps> = ({
             onClick={onClose}
             disabled={busy}
             aria-label={closeLabel}
+            data-dialog-close
             className="p-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 shrink-0 disabled:opacity-50"
           >
             <X className="w-5 h-5" />
@@ -67,15 +72,17 @@ export const DialogShell: React.FC<DialogShellProps> = ({
   );
 };
 
-/** Inline error/success banner used inside the dialogs and on the Users page. */
-export const MessageBanner: React.FC<{ tone: 'error' | 'success'; children: React.ReactNode }> = ({ tone, children }) => (
+/** Inline error/warning/success banner used inside the dialogs and on the Users page. */
+const BANNER_CLASS: Record<'error' | 'warning' | 'success', string> = {
+  error: 'border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300',
+  warning: 'border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300',
+  success: 'border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300',
+};
+
+export const MessageBanner: React.FC<{ tone: 'error' | 'warning' | 'success'; children: React.ReactNode }> = ({ tone, children }) => (
   <div
-    role={tone === 'error' ? 'alert' : 'status'}
-    className={
-      tone === 'error'
-        ? 'p-3 rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 text-xs text-rose-700 dark:text-rose-300 break-words'
-        : 'p-3 rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/30 text-xs text-emerald-800 dark:text-emerald-300 break-words'
-    }
+    role={tone === 'error' ? 'alert' : tone === 'warning' ? 'note' : 'status'}
+    className={`p-3 rounded-lg border text-xs break-words ${BANNER_CLASS[tone]}`}
   >
     {children}
   </div>

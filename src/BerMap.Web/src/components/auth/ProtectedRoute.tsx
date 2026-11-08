@@ -36,7 +36,7 @@ export const ProtectedRoute: React.FC = () => {
         // 502 or a network error must not throw away a still-valid token.
         if (err?.status === 401 || err?.status === 403) {
           setFailed(true);
-          logout();
+          logout('session_ended');
         } else {
           setUnreachable(true);
         }

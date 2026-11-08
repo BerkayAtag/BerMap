@@ -136,6 +136,34 @@ public class SnapshotServiceTests
     }
 
     [Fact]
+    public async Task CompareSnapshots_IgnoresReconciliationBookkeeping_ButNotRealPropertyChanges()
+    {
+        await using var context = CreateContext();
+        var (first, second) = await SeedGraphAsync(context);
+        first.PropertiesJson = """{"PowerState":"POWERED_ON","_lastReconciliationAt":"2026-11-01T10:00:00.0000000Z","_lastReconciliationEvidence":"BIOS UUID match","_lastReconciliationConfidence":"Verified","_sourceSystems":["VMware"]}""";
+        second.PropertiesJson = """{"_lastReconciliationAt":"2026-11-01T10:00:00.0000000Z"}""";
+        await context.SaveChangesAsync();
+        var service = new SnapshotService(context);
+
+        var baseline = await service.CreateSnapshotAsync(new CreateSnapshotRequest { Name = "Before" }, "tester");
+
+        // An unchanged re-discovery only rewrites the bookkeeping.
+        first.PropertiesJson = """{"_sourceSystems":["VMware","ActiveDirectory"],"_lastReconciliationConfidence":"High","_lastReconciliationEvidence":"FQDN match","_lastReconciliationAt":"2026-11-02T10:00:00.0000000Z","PowerState":"POWERED_ON"}""";
+        second.PropertiesJson = """{"_lastReconciliationAt":"2026-11-02T10:00:00.0000000Z","CpuUsagePercent":"91"}""";
+        await context.SaveChangesAsync();
+
+        var current = await service.CreateSnapshotAsync(new CreateSnapshotRequest { Name = "After" }, "tester");
+        var diff = await service.CompareSnapshotsAsync(baseline.Id, current.Id);
+
+        var changed = Assert.Single(diff.ChangedNodes);
+        Assert.Equal(second.Id, changed.NodeId);
+        var properties = Assert.Single(changed.Changes, c => c.Field == "Properties");
+        Assert.DoesNotContain("_lastReconciliation", properties.From + properties.To);
+        Assert.Contains("CpuUsagePercent", properties.To);
+        Assert.Equal(1, diff.ChangedNodesCount);
+    }
+
+    [Fact]
     public async Task SnapshotRows_RejectUpdatesAndDeletes()
     {
         await using var context = CreateContext();

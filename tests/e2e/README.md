@@ -6,20 +6,21 @@ Web konsolunun her işlevini gerçek bir BerMap sunucusu ve PostgreSQL'e karşı
 
 | Dosya | Kapsam |
 |---|---|
-| `auth.spec.ts` | Hatalı/doğru giriş, korumalı rota yönlendirmesi (sorgu dizesi korunur), geçersiz token, çıkış |
+| `auth.spec.ts` | Hatalı/doğru giriş, İngilizce arayüzde yerelleştirilmiş giriş hatası, korumalı rota yönlendirmesi (sorgu dizesi korunur), geçersiz token ("oturum sona erdi" notu), çıkış |
 | `pages.spec.ts` | Her sayfa masaüstünde ve 390 px'te, açık ve koyu temada: konsol hatası, başarısız `/api` isteği ve yatay taşma yok; menü, kenar çubuğu, tema/dil, global arama, mobil çekmece |
 | `roles.spec.ts` | Salt-Okunur Görüntüleyici, Altyapı Operatörü, Güvenlik Denetçisi ve Platform Yöneticisi için menü öğeleri ve düğmeler |
-| `users.spec.ts` | Kullanıcı oluşturma, rol düzenleme, parola sıfırlama, devre dışı bırakma (oturum sonlanır), istemci doğrulaması, kullanıcı menüsünden kendi parolasını değiştirme (oturum açık kalır) |
-| `integrations.spec.ts` | Sihirbazla VMware entegrasyonu oluşturma, düzenleme (API'den eklenen ayar anahtarları korunur), devre dışı bırakma/etkinleştirme, silme; collector yönetimli kartlar |
+| `users.spec.ts` | Kullanıcı oluşturma, rol düzenleme, parola sıfırlama, devre dışı bırakma (oturum sonlanır), istemci doğrulaması, kullanıcı menüsünden kendi parolasını değiştirme (oturum açık kalır), yöneticinin kendi rolünü değiştirmesi ve kendi parolasını sıfırlaması (önceden uyarı, ardından nedenini söyleyen giriş sayfası) |
+| `integrations.spec.ts` | Sihirbazla VMware entegrasyonu oluşturma, düzenleme (API'den eklenen ayar anahtarları korunur), devre dışı bırakma/etkinleştirme, silme; collector yönetimli kartlar; düz HTTP'de kimlik kopyalama ve tam kimliğin seçili gösterilmesi; AD sihirbazında LDAPS/StartTLS/düz LDAP port eşlemesi; uç nokta değişince parolanın yeniden istenmesi (istemci ve sunucu `SECRET_REQUIRED_FOR_ENDPOINT_CHANGE`) |
 | `collectors.spec.ts` | Collector kartı ve metrikleri, kayıt bilgisi, onaylı kaldırma |
 | `inventory.spec.ts` | Arama, tür filtresi, `?q=` ve `?node=` derin bağlantıları, bulunamayan düğüm, CSV dışa aktarımının BOM ve formül enjeksiyonu koruması |
-| `map.spec.ts` | Filtre sayacı, eşleşme yok bildirimi, düğüm panelinden envantere ve simülasyona geçiş |
+| `map.spec.ts` | Filtre sayacı (beklenen sayılar sayfanın kendi topoloji yanıtından), eşleşme yok bildirimi, düğüm panelinden envantere ve simülasyona geçiş |
+| `dialogs.spec.ts` | Her modal iletişim kutusunda klavye odağı: açılınca içeri taşınır, Tab/Shift+Tab içeride kalır, kapanınca açan denetime döner |
 | `simulation.spec.ts` | `?target=` ile host kesintisi (N-1), listeden iş yükü kesintisi, Markdown risk raporu içeriği, yazdırma görünümü, görüntüleyici rolüyle çalıştırma |
 | `snapshots.spec.ts` | `?id=` detayı, bütünlük doğrulaması, oluşturma ve iki snapshot'ı karşılaştırma |
 | `audit-reports.spec.ts` | Denetimde işleme göre süzme ve süzülmüş CSV; Raporlar sayfasındaki tüm dışa aktarımlar |
 | `capacity.spec.ts` | %80 uyarı / %90 kritik eşikleri, demo cluster ve host değerleri, envantere geçiş |
 
-`global-setup.ts` sunucu hazır olana kadar bekler, sentetik demo verisini gerçek API'den yükler (`support/seed.ts`: collector yönetimli iki entegrasyon, `final=true` collector gönderimleriyle 37 düğüm, bir collector, bir snapshot) ve her rol için bir hesap açar. Rol oturumları `.auth/` altına Playwright storage state olarak yazılır; testler giriş formundan geçmeden oturum açmış başlar (giriş ucu dakikada 10 denemeyle sınırlıdır). Hesapları değiştiren testler kendi kullanıcılarını oluşturur. Bazı testler kendi collector yönetimli entegrasyonunu ekler (`E2E · …`); demo verisinin sayıları bu yüzden yalnız demo düğümleri üzerinden doğrulanır.
+`global-setup.ts` sunucu hazır olana kadar bekler, sentetik demo verisini gerçek API'den yükler (`support/seed.ts`: collector yönetimli iki entegrasyon, `final=true` collector gönderimleriyle 37 düğüm, bir collector, bir snapshot) ve her rol için bir hesap açar. Rol oturumları `.auth/` altına Playwright storage state olarak yazılır; testler giriş formundan geçmeden oturum açmış başlar (giriş ucu dakikada 10 denemeyle sınırlıdır). Hesapları değiştiren testler kendi kullanıcılarını oluşturur. Bazı testler kendi collector yönetimli entegrasyonunu ekler (`E2E · …`); demo verisinin sayıları bu yüzden yalnız demo düğümleri üzerinden ya da (haritadaki gibi) sayfanın o an gösterdiği API yanıtı üzerinden doğrulanır.
 
 Tüm adlar kurgusaldır (`corp.bermap.demo`). Aynı veritabanına karşı tekrar çalıştırmak güvenlidir.
 
@@ -67,3 +68,4 @@ Paketlenmiş sunucuya karşı çalıştırmak da aynıdır: `BERMAP_E2E_BASE_URL
 - Bekleme için `waitForTimeout` yerine `expect(...).toBeVisible()` gibi beklemeli doğrulamalar kullanın.
 - Başka testlerin verisine güvenmeyin: oluşturduğunuz kayıtlara `uniqueName()` ile benzersiz ad verin, sayıları API'den hesaplayın.
 - `problems.expectNone()` sayfanın konsol hatası ve başarısız `/api` isteği üretmediğini doğrular.
+- Giriş ve parola değiştirme uçları birlikte dakikada 10 istekle sınırlıdır ve `globalSetup` ile mevcut testler bu payın çoğunu kullanır. Yeni oturum gerekiyorsa `login()` yardımcısını (429'da bir sonraki pencereyi bekler) ve `test.setTimeout(150_000)` kullanın.

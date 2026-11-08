@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Application.DTOs;
@@ -371,9 +372,31 @@ public sealed class SnapshotService : ISnapshotService
         Add(changes, "DomainSid", a.DomainSid, b.DomainSid);
         Add(changes, "IsStale", a.IsStale.ToString(), b.IsStale.ToString());
         Add(changes, "Properties",
-            SnapshotGraphHasher.Canonicalize(a.PropertiesJson),
-            SnapshotGraphHasher.Canonicalize(b.PropertiesJson));
+            ComparableProperties(a.PropertiesJson),
+            ComparableProperties(b.PropertiesJson));
         return changes;
+    }
+
+    /// <summary>
+    /// Node properties as compared between snapshots. Keys starting with '_'
+    /// are reconciliation bookkeeping (_lastReconciliationAt/Evidence/
+    /// Confidence, _sourceSystems) that ingestion rewrites on every run; they
+    /// would report every re-discovered node as changed. The stored hash still
+    /// covers them.
+    /// </summary>
+    internal static string ComparableProperties(string? json)
+    {
+        if (SnapshotGraphHasher.ParseObject(json) is not JsonObject properties)
+            return SnapshotGraphHasher.Canonicalize(json);
+
+        foreach (var key in properties.Select(kv => kv.Key)
+                     .Where(k => k.StartsWith('_'))
+                     .ToList())
+        {
+            properties.Remove(key);
+        }
+
+        return SnapshotGraphHasher.Sort(properties)?.ToJsonString() ?? "{}";
     }
 
     private static List<FieldChangeDto> CompareRelationshipFields(SnapshotRelationship a, SnapshotRelationship b)

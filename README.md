@@ -5,7 +5,7 @@
 <p align="center"><b>Altyapınızı haritalayın. Değişikliği önce simülasyonda deneyin.</b><br>Kurum içi keşif · Bağımlılık haritası · Etki ve kapasite simülasyonu</p>
 
 <p align="center">
-  <a href="https://github.com/BerkayAtag/BerMap/releases/latest"><b>Sunucu paketini indir (0.3.0)</b></a> ·
+  <a href="https://github.com/BerkayAtag/BerMap/releases/latest"><b>Sunucu paketini indir (0.4.0)</b></a> ·
   <a href="https://berkayatag.github.io/BerMap/">Tanıtım sayfası</a> ·
   <a href="deploy/KURULUM.md">Kurulum</a> ·
   <a href="CHANGELOG.md">Sürüm geçmişi</a> ·
@@ -23,13 +23,13 @@ BerMap, Active Directory ve VMware vCenter'ı **salt okunur** keşfeder; sunucul
 
 [Son sürüm](https://github.com/BerkayAtag/BerMap/releases/latest) sayfasından sunucu paketini ve `SHA256SUMS.txt` dosyasını indirin. Paketler self-contained'dir (sunucuda .NET gerekmez) ve web konsolunu içerir. Tek ön koşul erişilebilir bir **PostgreSQL 16+** sunucusudur; BerMap veritabanını ve şemayı ilk açılışta kurar.
 
-**Windows Server** — `BerMap-Server-0.3.0-win-x64.zip` paketini açıp yönetici PowerShell'de:
+**Windows Server** — `BerMap-Server-0.4.0-win-x64.zip` paketini açıp yönetici PowerShell'de:
 
 ```powershell
 .\Install-BerMapServer.ps1 -DbHost localhost -DbUser bermap
 ```
 
-**Linux (systemd)** — `bermap-server-0.3.0-linux-x64.tar.gz` (veya `linux-arm64`):
+**Linux (systemd)** — `bermap-server-0.4.0-linux-x64.tar.gz` (veya `linux-arm64`):
 
 ```bash
 sudo ./install.sh --db-host localhost --db-user bermap
@@ -68,10 +68,10 @@ Ekranlar sentetik demo verisiyle gerçek uygulamadan alınmıştır. Konsol Tür
 ## Özellikler
 
 - **Salt okunur keşif:** Active Directory (LDAPS, sayfalı arama, birden çok domain/forest) ve vCenter (REST + PropertyCollector, host/VM kapasite metrikleri). Kaynak sistemlere hiçbir yazma yapılmaz; kimlik bilgileri AES-256-GCM ile şifreli kasada tutulur.
-- **Zamanlanmış keşif:** her entegrasyon için cron takvimi (sunucu saatiyle); kaçırılan çalışmalar yığılmaz, birden çok sunucuda tek kez çalışır. Uzak ağlar için dışarı yönlü bağlanan **collector**; çevrimdışıyken verileri yerel kuyrukta tutar.
+- **Zamanlanmış keşif:** her entegrasyon için cron takvimi (sunucu saatiyle); kaçırılan çalışmalar yığılmaz, birden çok sunucuda tek kez çalışır. Uzak ağlar için **collector**: AD ve vCenter keşfini yerinde, kendi takvimiyle yapar, sonuçları sunucuya yalnız dışarı yönlü HTTPS ile gönderir; sunucuya ulaşamadığında yerel kuyrukta tutar.
 - **Uzlaştırma:** aynı sunucu AD'de bilgisayar, vCenter'da VM olarak görünse de SID, BIOS UUID ve FQDN ile tek düğüm olur. Yalnız ada dayanan eşleşmeler otomatik birleştirilmez, incelemeye düşer.
 - **Altyapı haritası ve envanter:** katmanlı bağımlılık haritası, filtre, düğüm detayı; envanterde arama, filtre, CSV dışa aktarım ve inceleme kuyruğu.
-- **Simülasyon (BerSim):** host, datastore, ağ ve iş yükü kesintisi senaryoları. Doğrudan, olası ve mümkün etkiler bağımlılık yollarıyla; host arızasında cluster'ın **N-1** CPU/RAM payı ve HA durumu; risk skoru ve öneriler. Sonuç **yazdırılabilir değişiklik risk raporu** ya da Markdown olarak indirilir.
+- **Simülasyon (BerSim):** host, datastore, ağ ve iş yükü kesintisi senaryoları. Doğrudan, olası ve mümkün etkiler bağımlılık yollarıyla; host arızasında cluster'ın **N-1** CPU/RAM payı ve HA durumu; risk skoru ve öneriler. Simülasyon güncel graf ya da geçmiş bir **snapshot** üzerinde çalışır. Sonuç **yazdırılabilir değişiklik risk raporu** ya da Markdown olarak indirilir.
 - **Snapshot:** grafın değişmez, hash'li anlık görüntüleri; iki snapshot'ı karşılaştırma ve bütünlük doğrulama.
 - **Kullanıcılar ve roller:** yerel hesaplar (PBKDF2), Platform Yöneticisi, Entegrasyon Yöneticisi, Altyapı Operatörü, Güvenlik Denetçisi, Salt Okunur roller; parola değiştirme ve sıfırlama. Devre dışı bırakılan hesap 30 saniye içinde erişimini kaybeder.
 - **Denetim ve raporlar:** giriş, kullanıcı, entegrasyon, keşif ve snapshot işlemlerinin denetim kaydı (filtre, sayfalama, CSV); envanter, denetim ve snapshot dışa aktarımları (UTF-8, formül enjeksiyonuna karşı korumalı).
@@ -100,7 +100,8 @@ cd src/BerMap.Web && npm install && npm run dev               # http://localhost
 
 - İlk açılışta migration'lar uygulanır, roller ve `admin` hesabı oluşturulur. Parola `BerMap:Bootstrap:AdminPassword` ile verilmezse geliştirmede `src/BerMap.Api/.bermap-vault/initial-admin-password.txt` dosyasına yazılır.
 - Konsol `/api` isteklerini `BERMAP_API_URL` adresine (varsayılan `http://localhost:5294`) yönlendirir.
-- Testler: `dotnet test BerMap.slnx` ve `cd src/BerMap.Web && npm run lint && npm run build`. PostgreSQL entegrasyon testleri `BERMAP_TEST_CONNECTION_STRING` tanımlıysa çalışır.
+- Testler: `dotnet test BerMap.slnx` (PostgreSQL entegrasyon testleri `BERMAP_TEST_CONNECTION_STRING` tanımlıysa çalışır), `cd src/BerMap.Web && npm run lint && npm test && npm run build`.
+- Uçtan uca testler: `tests/e2e` (Playwright) konsolun tüm işlevlerini gerçek sunucu ve PostgreSQL üzerinde dener; CI'da paketlenmiş sunucuya karşı çalışır. Ayrıntı: [tests/e2e/README.md](tests/e2e/README.md).
 - Sunucu paketi: `deploy/package.sh <sürüm> <win-x64|linux-x64|linux-arm64> out` (önce web konsolunu derleyin).
 
 Proje yapısı: `src/BerMap.Api` (sunucu), `BerMap.Application`/`Domain`/`Infrastructure` (iş mantığı ve veri), `BerMap.Integrations` (AD ve VMware adaptörleri), `BerMap.Simulation` (BerSim), `BerMap.Collector`, `BerMap.Web` (konsol), `deploy` (paketleme ve kurulum), `site` (tanıtım sayfası).
@@ -108,8 +109,6 @@ Proje yapısı: `src/BerMap.Api` (sunucu), `BerMap.Application`/`Domain`/`Infras
 ## Bilinen sınırlar
 
 - Yalnız Active Directory ve VMware vCenter adaptörleri vardır; Zabbix, SCCM/MECM, SQL Server ve ağ cihazı adaptörleri planlanmaktadır.
-- Simülasyon her zaman güncel graf üzerinde çalışır; snapshot üzerinde simülasyon yoktur.
-- Collector kayıt olur, heartbeat gönderir ve kuyruğu iletir; adaptörleri kendisi henüz çalıştırmaz.
 - Konsol girişi yerel hesaplarladır (AD ile giriş, MFA yoktur). Paketler kod imzalı değildir.
 - Gerçek AD/vCenter ortamında kabul testi kurumunuzun pilot ortamında yapılmalıdır.
 

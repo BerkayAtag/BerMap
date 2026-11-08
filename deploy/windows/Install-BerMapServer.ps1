@@ -18,6 +18,13 @@
     migrated on first start if the user has CREATEDB rights; otherwise create an
     empty database owned by the user first.
 
+    The data directory (configuration, credential vault) is readable by SYSTEM and
+    Administrators only and owned by Administrators. A data directory or configuration
+    file another user created beforehand (they could change its permissions again later)
+    is refused unless -Force is given, which takes ownership and resets the permissions.
+    The installer only uses an install directory it creates itself, one it installed into
+    before, or the empty default directory.
+
     Running the script again upgrades in place. The existing configuration is
     merged, not rebuilt: only the values given change (-Db* parameters the
     connection string, -Port/-CertificatePath the listen endpoint), and settings
@@ -47,7 +54,9 @@ param(
     [string] $CertificatePath,
     [SecureString] $CertificatePassword,
     [string] $ServiceName = 'BerMapServer',
-    [switch] $NoFirewallRule
+    [switch] $NoFirewallRule,
+    # Take ownership of a data directory or configuration file another user created.
+    [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,8 +64,13 @@ $packageDir = Split-Path -Parent $PSCommandPath
 $sourceDir = Join-Path $packageDir 'server'
 $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 # Written into the install directory; the uninstaller only removes a directory carrying it.
+# It reads "created" when this script created the directory (the uninstaller removes it) and
+# "existing" for the empty default directory found in place (the uninstaller empties it).
 $marker = '.bermap-server'
+# Identifies the server's data directory (vault), which a collector never uses as its own.
+$dataMarker = '.bermap-server-data'
 $configVariable = 'BERMAP_CONFIG_FILE'
+$defaultInstallDir = Join-Path $env:ProgramFiles 'BerMap\Server'
 
 function Write-Step([string] $Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -100,6 +114,75 @@ function Get-ListenUrl($Endpoints) {
     return $null
 }
 
+function New-ProtectedAcl([bool] $Directory) {
+    # SYSTEM and Administrators only; inheritance from ProgramData (Users: read, create) is cut.
+    # The owner becomes Administrators: an owner may always change the permissions again.
+    $acl = if ($Directory) { New-Object System.Security.AccessControl.DirectorySecurity } else { New-Object System.Security.AccessControl.FileSecurity }
+    $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = if ($Directory) { 'ContainerInherit, ObjectInherit' } else { 'None' }
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', $inherit, 'None', 'Allow')))
+    }
+    return $acl
+}
+
+function Get-OwnerSid([string] $Path) {
+    try { return (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { return $null }
+}
+
+function Get-TrustedOwners {
+    return @('S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+}
+
+function Test-ProtectedByInstaller([string] $Path) {
+    # Protected (no inheritance) and open to SYSTEM and Administrators only: nobody else could
+    # have added content to it.
+    try { $acl = Get-Acl -LiteralPath $Path } catch { return $false }
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin 'S-1-5-18', 'S-1-5-32-544') { return $false }
+    }
+    return $true
+}
+
+function Find-UntrustedItems([string] $Path, [string[]] $Trusted) {
+    # $Path and what is below it, unless it is a directory only SYSTEM and Administrators can
+    # write to, whose owner is not SYSTEM, Administrators or the administrator running this
+    # script. Such an owner keeps the right to change the permissions after this script set them.
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $owner = Get-OwnerSid $Path
+    if ($owner -notin $Trusted) { $Path }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    if ($owner -in $Trusted -and (Test-ProtectedByInstaller $Path)) { return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        Find-UntrustedItems $child.FullName $Trusted
+    }
+}
+
+function Assert-TrustedOwnership([string[]] $Paths, [string] $Root) {
+    # Refuses (or with -Force takes over) a data directory, configuration file or vault another
+    # user created before the installation: the planted configuration would be merged and the
+    # vault keys (token signing, master key) would stay readable by that user.
+    $trusted = Get-TrustedOwners
+    $untrusted = @($Paths | ForEach-Object { Find-UntrustedItems $_ $trusted } | Select-Object -Unique)
+    if ($untrusted.Count -eq 0) { return }
+    $first = $untrusted[0]
+    $owner = Get-OwnerSid $first
+    try { $owner = (New-Object System.Security.Principal.SecurityIdentifier($owner)).Translate([System.Security.Principal.NTAccount]).Value } catch { }
+    if (-not $Force) {
+        throw ("$first is owned by $(if ($owner) { $owner } else { 'an unknown account' }), not by SYSTEM or Administrators: " +
+            'another user may have created it to read or change the BerMap configuration. Inspect it, then remove it, ' +
+            'or run the installer again with -Force to take ownership and reset its permissions.')
+    }
+    Write-Warning "Taking ownership of $Root and resetting its permissions (-Force): $first was owned by $owner."
+    & icacls.exe $Root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /setowner failed for $Root (exit code $LASTEXITCODE)." }
+    & icacls.exe $Root /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed for $Root (exit code $LASTEXITCODE)." }
+}
+
 if (-not (Test-Path (Join-Path $sourceDir 'BerMap.Api.exe'))) {
     throw "server\BerMap.Api.exe was not found next to this script. Run it from the extracted release package."
 }
@@ -123,18 +206,32 @@ if ($installFull.StartsWith($dataFull, 'OrdinalIgnoreCase') -or $dataFull.Starts
     throw "-InstallDir and -DataDir must not contain each other: $InstallDir, $DataDir"
 }
 
-# Only an empty directory or one this script installed into is used (and later
-# removed by the uninstaller), never an arbitrary one such as C:\Tools. A directory
-# the registered service runs from counts as installed by this script.
+# The install directory is removed by the uninstaller: only a directory this script creates,
+# one it installed into before (marker), the one the registered service runs from, or the
+# empty default directory is used, never an arbitrary one such as C:\Tools (even when empty).
 $serviceRunsHere = $serviceExe -and (Get-FullPath (Split-Path -Parent $serviceExe)) -eq $installFull
-if ((Test-Path $InstallDir) -and -not (Test-Path (Join-Path $InstallDir $marker)) -and -not $serviceRunsHere -and
-    (Get-ChildItem -Path $InstallDir -Force | Select-Object -First 1)) {
-    throw "$InstallDir is not empty and is not a BerMap server directory ($marker is missing). Choose a new or empty -InstallDir."
-}
+$installDirState = if (-not (Test-Path $InstallDir)) { 'created' }
+    elseif (Test-Path (Join-Path $InstallDir $marker)) { 'installed' }
+    # Installed into before without completing: a directory this script creates is marked at once.
+    elseif ($serviceRunsHere) { 'existing' }
+    elseif ($installFull -eq (Get-FullPath $defaultInstallDir) -and -not (Get-ChildItem -Path $InstallDir -Force | Select-Object -First 1)) { 'existing' }
+    else { throw "$InstallDir already exists and is not a BerMap server directory ($marker is missing). Choose a directory that does not exist yet with -InstallDir (it is created)." }
 
 $configPath = Join-Path $DataDir 'appsettings.Production.json'
 # Pre-release 0.3.0 builds kept the file in the program directory; it is moved.
 $legacyConfigPath = Join-Path $InstallDir 'appsettings.Production.json'
+
+# The existing configuration is merged only once the data directory, the files and the vault
+# are known to be owned by SYSTEM or Administrators. A collector's data directory below it
+# (Collector) is checked by its own installer.
+$ownershipPaths = @($DataDir, $configPath, $legacyConfigPath)
+if (Test-Path $configPath) {
+    try {
+        $existingVault = (Get-Content $configPath -Raw | ConvertFrom-Json).BerMap.CredentialVault.Directory
+        if ($existingVault) { $ownershipPaths += [string] $existingVault }
+    } catch { }
+}
+Assert-TrustedOwnership $ownershipPaths $DataDir
 $existingPath = @($configPath, $legacyConfigPath) | Where-Object { Test-Path $_ } | Select-Object -First 1
 $config = if ($existingPath) { ConvertTo-OrderedTree (Get-Content $existingPath -Raw | ConvertFrom-Json) } else { [ordered]@{} }
 if ($config -isnot [System.Collections.IDictionary]) { $config = [ordered]@{} }
@@ -224,21 +321,23 @@ if ($service -and $service.Status -ne 'Stopped') {
 
 Write-Step "Copying server files to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-New-Item -ItemType File -Force -Path (Join-Path $InstallDir $marker) | Out-Null
+# A directory this script created is marked at once: it is BerMap's whatever happens next.
+# The empty default directory found in place is marked only after a successful install.
+if ($installDirState -eq 'created') { Set-Content -Path (Join-Path $InstallDir $marker) -Value 'created' -Encoding ASCII }
 Copy-Item -Path (Join-Path $sourceDir '*') -Destination $InstallDir -Recurse -Force
 
 Write-Step "Writing $configPath"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-if (-not (Test-Path $configPath)) { New-Item -ItemType File -Path $configPath | Out-Null }
-# The file holds the database password: SYSTEM and Administrators only, set before
-# the content is written.
-$acl = New-Object System.Security.AccessControl.FileSecurity
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
-    $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')))
+# The directory holds the configuration (database password, enrollment token) and the vault
+# (master key, token signing key): SYSTEM and Administrators only, owned by Administrators,
+# set before the content is written. A collector data directory below it keeps its own
+# protected permissions.
+Set-Acl -Path $DataDir -AclObject (New-ProtectedAcl $true)
+if (-not (Test-Path (Join-Path $DataDir $dataMarker))) {
+    Set-Content -Path (Join-Path $DataDir $dataMarker) -Value 'BerMap server data directory (credential vault)' -Encoding ASCII
 }
-Set-Acl -Path $configPath -AclObject $acl
+if (-not (Test-Path $configPath)) { New-Item -ItemType File -Path $configPath | Out-Null }
+Set-Acl -Path $configPath -AclObject (New-ProtectedAcl $false)
 ConvertTo-Json -InputObject $config -Depth 20 | Set-Content -Path $configPath -Encoding UTF8
 if ($legacyConfigPath -ne $configPath -and (Test-Path $legacyConfigPath)) { Remove-Item -Path $legacyConfigPath -Force }
 
@@ -312,6 +411,9 @@ try {
 if (-not $ready) {
     throw "BerMap did not become ready at $probe ($lastError). Check the Windows Application event log and the database connection in $configPath."
 }
+
+# The installation succeeded: the empty default directory found in place is BerMap's now.
+if ($installDirState -eq 'existing') { Set-Content -Path (Join-Path $InstallDir $marker) -Value 'existing' -Encoding ASCII }
 
 Write-Host ''
 Write-Host "BerMap is running: ${scheme}://$($env:COMPUTERNAME):$Port" -ForegroundColor Green

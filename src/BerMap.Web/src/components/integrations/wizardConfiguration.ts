@@ -95,3 +95,38 @@ export function updateConfiguration(
   const changed = Object.fromEntries(Object.entries(after).filter(([key, value]) => value !== before[key]));
   return { ...(saved ?? {}), ...changed };
 }
+
+/** LDAPS listens on 636 (implicit TLS); StartTLS and plaintext LDAP on 389. */
+export const LDAPS_PORT = 636;
+export const LDAP_PORT = 389;
+
+export function ldapDefaultPort(useSsl: boolean): number {
+  return useSsl ? LDAPS_PORT : LDAP_PORT;
+}
+
+/**
+ * The port after switching between LDAPS and StartTLS/plaintext: a standard
+ * LDAP port follows the transport, a port the user typed (3269, 10636...) stays.
+ */
+export function ldapPortForTransport(port: number, useSsl: boolean): number {
+  return port === LDAPS_PORT || port === LDAP_PORT ? ldapDefaultPort(useSsl) : port;
+}
+
+/** True when an LDAP port clearly belongs to the other transport (StartTLS on 636, LDAPS on 389). */
+export function ldapPortMismatch(port: number, useSsl: boolean): boolean {
+  return useSsl ? port === LDAP_PORT : port === LDAPS_PORT;
+}
+
+/**
+ * Fields that decide where the stored credential is sent. The server refuses to
+ * change them without a new secret (SECRET_REQUIRED_FOR_ENDPOINT_CHANGE), so a
+ * changed endpoint cannot be used to replay the saved password elsewhere.
+ */
+const ENDPOINT_KEYS = ['server', 'port', 'username', 'useSsl', 'useStartTls', 'allowUntrustedCertificate', 'allowPlaintext'] as const;
+
+/** True when the edit changes the server, port, username or TLS settings. */
+export function endpointChanged(prefilled: ConfigurationFields, form: ConfigurationFields): boolean {
+  const before = editedConfiguration(prefilled);
+  const after = editedConfiguration(form);
+  return ENDPOINT_KEYS.some((key) => key in after && after[key] !== before[key]);
+}

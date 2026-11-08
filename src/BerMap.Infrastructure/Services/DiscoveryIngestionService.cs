@@ -219,17 +219,49 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
         // The (source, target, type) key is unique across all integrations. Two
         // sources that reconcile onto the same nodes (or a re-created
         // integration) would otherwise insert a duplicate and fail the run.
-        var touchedNodeIds = externalToNodeId.Values.Distinct().ToList();
-        if (touchedNodeIds.Count > 0 && discovery.Relationships.Count > 0)
+        // The lookup covers every endpoint the batch's relationships resolve
+        // to, including nodes sent in an earlier batch of a multi-batch
+        // snapshot (the final batch carries the relationships, not the nodes).
+        var endpointNodeIds = new HashSet<Guid>();
+        foreach (var relationship in discovery.Relationships)
         {
+            if (TryResolveNode(relationship.SourceExternalId, out var sourceId) &&
+                TryResolveNode(relationship.TargetExternalId, out var targetId) &&
+                sourceId != targetId)
+            {
+                endpointNodeIds.Add(sourceId);
+                endpointNodeIds.Add(targetId);
+            }
+        }
+
+        // Owners that can no longer refresh their edges: deleted (or missing)
+        // integrations. Their edges, and any stale foreign edge, are adopted by
+        // the integration that re-discovers them.
+        var liveOwnerIds = new HashSet<Guid>();
+        if (endpointNodeIds.Count > 0)
+        {
+            var endpointIds = endpointNodeIds.ToList();
             var foreignRelationships = await _context.InfrastructureRelationships
                 .Where(r => r.IntegrationId != integrationId &&
-                            touchedNodeIds.Contains(r.SourceNodeId) &&
-                            touchedNodeIds.Contains(r.TargetNodeId))
+                            endpointIds.Contains(r.SourceNodeId) &&
+                            endpointIds.Contains(r.TargetNodeId))
                 .ToListAsync(cancellationToken);
 
             foreach (var foreign in foreignRelationships)
                 relationshipIndex.TryAdd((foreign.SourceNodeId, foreign.TargetNodeId, foreign.RelationshipType), foreign);
+
+            var ownerIds = foreignRelationships
+                .Where(r => r.IntegrationId.HasValue)
+                .Select(r => r.IntegrationId!.Value)
+                .Distinct()
+                .ToList();
+            if (ownerIds.Count > 0)
+            {
+                liveOwnerIds.UnionWith(await _context.Integrations
+                    .Where(i => ownerIds.Contains(i.Id) && i.DeletedAt == null)
+                    .Select(i => i.Id)
+                    .ToListAsync(cancellationToken));
+            }
         }
 
         foreach (var relationship in discovery.Relationships)
@@ -276,15 +308,32 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
                 relationshipIndex[key] = existing;
                 result.RelationshipsCreated++;
             }
-            else if (existing.IntegrationId != integrationId)
+            else if (existing.IntegrationId != integrationId &&
+                     !existing.IsStale &&
+                     (existing.IntegrationId == null || liveOwnerIds.Contains(existing.IntegrationId.Value)))
             {
-                // Owned and refreshed by another integration: reusing it avoids a
-                // duplicate, but its evidence and freshness stay with its owner.
+                // Owned and refreshed by another live integration (or created
+                // by hand): reusing it avoids a duplicate, but its evidence and
+                // freshness stay with its owner.
                 continue;
             }
             else
             {
-                var changed = existing.Evidence != relationship.Evidence ||
+                // An edge whose owner was deleted, or that its owner no longer
+                // reports (stale), would otherwise stay stale for good while
+                // this integration keeps observing it: take it over.
+                var adopted = existing.IntegrationId != integrationId;
+                if (adopted)
+                {
+                    existing.IntegrationId = integrationId;
+                    existing.SourceSystem = string.IsNullOrWhiteSpace(relationship.SourceSystem)
+                        ? integration.AdapterType
+                        : relationship.SourceSystem;
+                    existingRelationships.Add(existing);
+                }
+
+                var changed = adopted ||
+                              existing.Evidence != relationship.Evidence ||
                               existing.ConfidenceLevel != confidence ||
                               existing.IsStale;
 
@@ -326,9 +375,15 @@ public sealed class DiscoveryIngestionService : IDiscoveryIngestionService
             : new List<Guid>();
         if (affectedNodeIds.Count > 0)
         {
-            var allLinks = await _context.NodeSourceLinks
-                .Where(l => affectedNodeIds.Contains(l.NodeId))
-                .ToListAsync(cancellationToken);
+            // Links added by this run are not in the database yet: without them
+            // a node this integration has just reported for the first time
+            // looks as if only its (stale) older links referenced it.
+            var allLinks = (await _context.NodeSourceLinks
+                    .Where(l => affectedNodeIds.Contains(l.NodeId))
+                    .ToListAsync(cancellationToken))
+                .Concat(links)
+                .DistinctBy(l => l.Id)
+                .ToList();
 
             var linksByNode = allLinks.GroupBy(l => l.NodeId).ToDictionary(g => g.Key, g => g.ToList());
             foreach (var nodeId in affectedNodeIds)

@@ -33,6 +33,7 @@ import { downloadCsv } from '@/lib/csv';
 import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { useCanOperate } from '@/stores/authStore';
 import { canSimulate } from './simulation/scenarios';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -254,6 +255,8 @@ export const InventoryPage: React.FC = () => {
   };
 
   useEscapeKey(selectedNodeId !== null, () => setSelectedNodeId(null));
+  const detailDialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(detailDialogRef, selectedNodeId !== null, { initialFocus: 'container' });
 
   const parameters = new URLSearchParams({
     page: String(page),
@@ -843,7 +846,8 @@ export const InventoryPage: React.FC = () => {
       {/* Detail modal */}
       {selectedNodeId && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+          ref={detailDialogRef}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs outline-none"
           role="dialog"
           aria-modal="true"
           aria-label={isTr ? 'Varlık detayı' : 'Entity detail'}
@@ -877,6 +881,7 @@ export const InventoryPage: React.FC = () => {
                 type="button"
                 onClick={() => setSelectedNodeId(null)}
                 className="p-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                data-dialog-close
                 aria-label={isTr ? 'Detayı kapat' : 'Close detail'}
               >
                 <X className="w-5 h-5" />

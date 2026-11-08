@@ -558,7 +558,7 @@ public class EntityReconciliationService : IEntityReconciliationService
                 : $"{existing.DiscoverySource} + {sourceName}";
         }
 
-        MergeProperties(existing, discovered, evidence, confidence, refreshFromSameSource);
+        MergeProperties(existing, discovered, evidence, confidence, refreshFromSameSource, refreshIdentity);
         return SnapshotComparable(existing) != before;
     }
 
@@ -567,7 +567,8 @@ public class EntityReconciliationService : IEntityReconciliationService
         DiscoveredNodeContract discovered,
         string evidence,
         string confidence,
-        bool refreshFromSameSource)
+        bool refreshFromSameSource,
+        bool refreshIdentity)
     {
         JsonObject props;
         try
@@ -582,7 +583,7 @@ public class EntityReconciliationService : IEntityReconciliationService
 
         foreach (var (key, value) in discovered.Properties)
         {
-            if (string.IsNullOrWhiteSpace(key))
+            if (string.IsNullOrWhiteSpace(key) || ParentKeys.Contains(key))
                 continue;
 
             // A source re-reporting its own object refreshes every value it
@@ -592,10 +593,28 @@ public class EntityReconciliationService : IEntityReconciliationService
                 props[key] = value;
         }
 
-        if (!string.IsNullOrWhiteSpace(discovered.ParentExternalId))
-            props["ParentExternalId"] = discovered.ParentExternalId;
-        if (!string.IsNullOrWhiteSpace(discovered.ParentName))
-            props["ParentName"] = discovered.ParentName;
+        // The parent is part of the node's identity (rule 6 compares it), and
+        // two sources of one node report different parents (an AD OU, a
+        // vSphere host). Like name and FQDN it is replaced only while the node
+        // has this single source; otherwise the first reported parent stays,
+        // so the sources do not overwrite each other on every run.
+        void MergeParent(string key, string? reported)
+        {
+            if (string.IsNullOrWhiteSpace(reported))
+                return;
+            var current = props[key] is JsonValue currentValue && currentValue.TryGetValue<string>(out var text)
+                ? text
+                : null;
+            if (refreshIdentity || string.IsNullOrWhiteSpace(current))
+                props[key] = reported;
+        }
+
+        MergeParent("ParentExternalId", !string.IsNullOrWhiteSpace(discovered.ParentExternalId)
+            ? discovered.ParentExternalId
+            : discovered.Properties.GetValueOrDefault("ParentExternalId"));
+        MergeParent("ParentName", !string.IsNullOrWhiteSpace(discovered.ParentName)
+            ? discovered.ParentName
+            : discovered.Properties.GetValueOrDefault("ParentName"));
 
         props["_lastReconciliationEvidence"] = evidence;
         props["_lastReconciliationConfidence"] = confidence;
@@ -611,6 +630,8 @@ public class EntityReconciliationService : IEntityReconciliationService
 
         node.PropertiesJson = props.ToJsonString();
     }
+
+    private static readonly HashSet<string> ParentKeys = new(StringComparer.Ordinal) { "ParentExternalId", "ParentName" };
 
     private static string SnapshotComparable(InfrastructureNode node)
     {

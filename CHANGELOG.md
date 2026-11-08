@@ -1,5 +1,26 @@
 # Sürüm geçmişi
 
+## 0.4.0 — 2026-11-07
+
+### Yeni
+- **Collector keşfi:** collector, `BerMap:Collector:Integrations` altında tanımlanan collector yönetimli entegrasyonlar için AD ve VMware adaptörlerini cron takvimiyle (yerel saat) yerinde çalıştırır; parola dosyadan ya da ortam değişkeninden okunur ve hiçbir yerde günlüğe yazılmaz. Sonuçlar düğüm ve ilişki sayısı ile boyutu sınırlı parçalar halinde tek bir işe gönderilir; başarısız çalışmalar sunucuya bildirilir. Aynı entegrasyon aynı anda iki kez çalışmaz.
+- **Collector paketleri:** `BerMap-Collector-<sürüm>-win-x64.zip`, `bermap-collector-<sürüm>-linux-x64|arm64.tar.gz`; Windows servisi ve systemd servisi kuran, yükselten ve kaldıran betikler, Türkçe collector kurulum rehberi. Release iş akışı collector'ı kurulan sunucuya karşı kurup çevrimiçi olduğunu doğrular.
+- **Snapshot üzerinde simülasyon:** simülasyon tabanı seçimi (güncel graf ya da snapshot), `?snapshot=` bağlantısı, sonuçta ve risk raporunda taban bilgisi; snapshot sayfasında "Simüle et".
+- **Uçtan uca testler:** `tests/e2e` Playwright paketi; CI'da paketlenmiş sunucu ve PostgreSQL üzerinde çalışır.
+- Collector yönetimli entegrasyon kartında entegrasyon kimliği (HTTP'de de çalışan kopyalama).
+
+### Düzeltmeler
+- Yeniden keşif, kaynağın kendi nesnesi için bildirdiği değerleri (metrikler, güç durumu; tek kaynaklı düğümlerde ad/FQDN/IP/MAC) artık güncelliyor; önceden ilk keşifteki değerler kalıyordu.
+- Kayıtlı parolası olan bir entegrasyonun sunucu, port, kullanıcı ya da TLS ayarları parola yeniden girilmeden değiştirilemez.
+- Çok parçalı keşifte başka entegrasyonun sahip olduğu ilişki benzersiz anahtar hatası veriyordu; silinmiş ya da eskimiş entegrasyonların ilişkileri artık devralınıyor.
+- Collector kuyruğunda kota ya da yeniden deneme sınırı yüzünden kaybolan parça, eksik snapshot'ın "tam" sayılıp düğümleri eskimiş işaretlemesine yol açıyordu; artık iş hata ile kapanıyor. Büyük ortamlarda sınırsız final parça 30 MB gövde sınırını aşıyordu.
+- Collector kapanırken yarım kalan gönderim kuyruğa alınıyor; sunucu adresinde yol öneki destekleniyor; collector heartbeat zaman aşımı ayarı uygulanıyor.
+- Collector parçası işlenemediğinde entegrasyon durumu ve son hata güncelleniyor; çok kaynaklı düğümlerin üst öğe bilgisi kaynaklar arasında gidip gelmiyor; yeni eklenen kaynak bağlantısı düğümü yanlışlıkla eskimiş yapmıyor.
+- Snapshot karşılaştırması iç kayıt alanlarını değişiklik saymıyor; envanter ve büyük sayfa numaralarında taşma hatası giderildi; aşırı büyük istekler 413 dönüyor.
+- Windows kurulumları veri dizini ve yapılandırma dosyasının sahipliğini alıyor; sunucu ve collector dizinleri ayrı işaretleniyor; kurulum/kaldırma yalnız kendi oluşturduğu dizinlere dokunuyor.
+- Konsol: tüm iletişim kutularında klavye odağı içeride tutuluyor; AD sihirbazında LDAPS/StartTLS değişince port güncelleniyor; kendi rolünü değiştiren ya da parolasını sıfırlayan yönetici önceden uyarılıyor; İngilizce arayüzde giriş hatası İngilizce.
+- Belgeler: API sözleşmesi ve SECURITY.md güncel davranışı anlatıyor.
+
 ## 0.3.0 — 2026-11-05
 
 ### Yeni

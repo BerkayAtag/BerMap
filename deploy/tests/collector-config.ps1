@@ -75,6 +75,9 @@ try {
     Assert-Throws 'server URL must be http(s)' 'Invalid -ServerUrl' { Invoke-Merge @{ ServerUrl = 'bermap.corp.local'; EnrollmentToken = (Secure $token) } }
     Assert-Throws 'server URL without a query' 'Invalid -ServerUrl' { Invoke-Merge @{ ServerUrl = 'https://bermap.corp.local/?x=1'; EnrollmentToken = (Secure $token) } }
     Assert-Throws 'token without whitespace' 'whitespace' { Invoke-Merge @{ ServerUrl = 'https://bermap.corp.local'; EnrollmentToken = (Secure 'abc def') } }
+    $result = Invoke-Merge @{ ServerUrl = 'https://proxy.corp.local/bermap/'; EnrollmentToken = (Secure $token) }
+    Assert-That 'a server URL path prefix is kept (trailing slash dropped)' { (Read-Config).BerMap.ServerUrl -eq 'https://proxy.corp.local/bermap' }
+    Remove-Item -Path $configPath -Force
 
     $result = Invoke-Merge @{ ServerUrl = 'https://bermap.corp.local/'; EnrollmentToken = (Secure $token); Name = 'dc2-collector' }
     $config = Read-Config

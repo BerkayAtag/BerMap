@@ -29,6 +29,11 @@ if (!string.IsNullOrWhiteSpace(externalConfigFile))
 builder.Services.AddWindowsService(options => options.ServiceName = "BerMapCollector");
 builder.Services.AddSystemd();
 
+// A stop during a multi-batch upload buffers the remaining batches to the offline
+// queue (local disk writes) before the process exits; give that time beyond the
+// 30 s default. systemd waits 90 s (TimeoutStopSec) before it kills the service.
+builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(60));
+
 // Discovery adapters run in-process, exactly as on the server. They are
 // stateless, read-only singletons.
 var adapters = new IIntegrationAdapter[] { new ActiveDirectoryAdapter(), new VMwareAdapter() };
@@ -53,7 +58,9 @@ builder.Services.AddSingleton<IOfflineQueue>(sp => new LocalBufferQueue(
 // open-snapshot bookkeeping is shared as well.
 builder.Services.AddHttpClient<CollectorClient>(client =>
 {
-    client.BaseAddress = new Uri(collectorOptions.ServerUrl);
+    // Ends with '/', and requests use relative paths: a path prefix
+    // (https://proxy.corp.local/bermap) is kept instead of silently dropped.
+    client.BaseAddress = collectorOptions.ServerBaseAddress;
     // Large batches are ingested synchronously by the server.
     client.Timeout = TimeSpan.FromSeconds(120);
     if (!string.IsNullOrWhiteSpace(collectorOptions.EnrollmentToken))

@@ -56,10 +56,11 @@ public class CollectorsController : ControllerBase
             .OrderBy(c => c.Name)
             .ToListAsync(cancellationToken);
 
+        var heartbeatTimeoutSeconds = HeartbeatTimeoutSeconds(_configuration);
         var result = collectors.Select(c =>
         {
             Heartbeats.TryGetValue(c.Id, out var heartbeat);
-            var isOnline = (DateTime.UtcNow - c.LastHeartbeatAt).TotalSeconds < 90;
+            var isOnline = (DateTime.UtcNow - c.LastHeartbeatAt).TotalSeconds < heartbeatTimeoutSeconds;
 
             var adapters = ParseStringList(c.SupportedAdaptersJson);
             var metrics = ParseMetrics(c.QueueMetricsJson);
@@ -185,11 +186,13 @@ public class CollectorsController : ControllerBase
 
         // A run that collected nothing is still reported: as a final batch with
         // Success=false and no nodes, which fails the job (and the integration
-        // health) without touching the inventory. Any other batch needs nodes.
+        // health) without touching the inventory. Relationships are sent in
+        // their own bounded chunks after the node batches, so a batch (final or
+        // not) may carry only relationships. Any other batch needs content.
         batch.Nodes ??= new();
         var isFailureReport = final && !batch.Success;
-        if (batch.Nodes.Count == 0 && !isFailureReport)
-            return BadRequest(new { message = "Discovery batch contains no nodes. Only a final batch reporting a failure (success=false) may be empty." });
+        if (batch.Nodes.Count == 0 && batch.Relationships.Count == 0 && !isFailureReport)
+            return BadRequest(new { message = "Discovery batch contains no nodes and no relationships. Only a final batch reporting a failure (success=false) may be empty." });
 
         if (!batch.IntegrationId.HasValue || batch.IntegrationId.Value == Guid.Empty)
         {
@@ -284,12 +287,26 @@ public class CollectorsController : ControllerBase
         catch (Exception ex)
         {
             _context.ChangeTracker.Clear();
+            var now = DateTime.UtcNow;
+            var ingestionError = $"INGESTION_FAILED: {ex.Message}";
             var failed = await _context.DiscoveryJobs.FirstAsync(j => j.Id == job.Id, CancellationToken.None);
             failed.Status = DiscoveryJobStatus.Failed;
-            failed.CompletedAt = DateTime.UtcNow;
+            failed.CompletedAt = now;
+            failed.DurationMs = (long)(now - failed.StartedAt).TotalMilliseconds;
             failed.CurrentPhase = "Failed";
             failed.CurrentMessage = "Collector batch could not be ingested.";
-            failed.ErrorsJson = JsonSerializer.Serialize(errors.Append($"INGESTION_FAILED: {ex.Message}"));
+            failed.ErrorsJson = JsonSerializer.Serialize(errors.Append(ingestionError));
+
+            // The failed snapshot is the integration's latest result: without
+            // this the console keeps showing it Active with no error while
+            // every snapshot fails.
+            var failedIntegration = await _context.Integrations.FirstAsync(i => i.Id == integrationId, CancellationToken.None);
+            failedIntegration.Status = IntegrationStatusRules.AfterRun(failedIntegration.IsEnabled, IntegrationStatus.Error);
+            failedIntegration.LastError = ingestionError;
+            failedIntegration.LastErrorAt = now;
+            failedIntegration.LastJobId = failed.Id;
+            failedIntegration.UpdatedAt = now;
+
             await _context.SaveChangesAsync(CancellationToken.None);
             throw;
         }
@@ -438,6 +455,18 @@ public class CollectorsController : ControllerBase
         return CryptographicOperations.FixedTimeEquals(expectedHash, providedHash)
             ? null
             : Unauthorized(new { message = "Invalid collector enrollment token." });
+    }
+
+    internal const int DefaultHeartbeatTimeoutSeconds = 90;
+
+    /// <summary>
+    /// A collector is Offline once no heartbeat arrived for
+    /// BerMap:Collectors:HeartbeatTimeoutSeconds (default 90 s, at least 10 s).
+    /// </summary>
+    internal static int HeartbeatTimeoutSeconds(IConfiguration configuration)
+    {
+        var configured = configuration.GetValue<int?>("BerMap:Collectors:HeartbeatTimeoutSeconds");
+        return configured is > 0 ? Math.Max(10, configured.Value) : DefaultHeartbeatTimeoutSeconds;
     }
 
     private static List<string> ParseStringList(string json)

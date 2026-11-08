@@ -422,7 +422,8 @@ const UserMenu: React.FC<{ onChangePassword: () => void }> = ({ onChangePassword
               type="button"
               role="menuitem"
               onClick={() => {
-                setOpen(false);
+                // Focus the menu button first: the dialog returns focus to it on close.
+                close();
                 onChangePassword();
               }}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary"

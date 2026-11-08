@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -34,15 +35,22 @@ public interface ICollectorClient
     Task<bool> SubmitDiscoveryBatchAsync(DiscoveryResult batch, Guid? snapshotId = null, bool final = false, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends batch <paramref name="sequence"/> (0-based) of a snapshot, or buffers it. A later
-    /// batch (sequence &gt; 0) is only ever delivered to the job its first batch opened: when
-    /// that job is unknown (the first batch was rejected) it is rejected locally, because on
-    /// its own it would open a new job and a final batch would then mark the rest of the
-    /// integration's inventory stale.
+    /// Sends batch <paramref name="sequence"/> (0-based) of a snapshot, or buffers it. The batches
+    /// of a snapshot reach the server in sequence or not at all: when one is lost (refused by the
+    /// server, evicted from the offline queue, dead-lettered, or missing when a later one is due)
+    /// the snapshot's remaining batches are dropped and its server job is closed with a failure
+    /// report (COLLECTOR_BATCH_REJECTED / COLLECTOR_BATCH_LOST), sent now or once the server is
+    /// reachable again. An incomplete snapshot therefore never completes and never marks the
+    /// integration's inventory stale. Once <paramref name="cancellationToken"/> is cancelled
+    /// (service stopping) the batch is buffered instead of sent, and an upload in progress is
+    /// abandoned and buffered, so the snapshot is finished after the restart.
     /// </summary>
     Task<BatchDelivery> SubmitSnapshotBatchAsync(DiscoveryResult batch, Guid snapshotId, int sequence, bool final, CancellationToken cancellationToken = default);
 
-    /// <summary>Delivers buffered batches in order. Returns false when a delivery failed and should be retried later.</summary>
+    /// <summary>
+    /// Sends pending failure reports, then delivers buffered batches in order. Returns false when a
+    /// delivery failed and should be retried later.
+    /// </summary>
     Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default);
 }
 
@@ -55,7 +63,10 @@ public enum BatchDelivery
     /// <summary>Kept in the offline queue; it is delivered in order later.</summary>
     Buffered,
 
-    /// <summary>The server (or the snapshot protocol) refused it for good; it was not kept.</summary>
+    /// <summary>
+    /// The server (or the snapshot protocol) refused it for good; it was not kept. The rest of its
+    /// snapshot is not sent either: the snapshot's server job is closed with a failure report.
+    /// </summary>
     Rejected
 }
 
@@ -87,8 +98,20 @@ public class CollectorClient : ICollectorClient
 {
     public const string BatchQueue = "discovery_batches";
 
+    /// <summary>Server-side request paths, relative to the base address so a path prefix is kept.</summary>
+    public const string RegisterPath = "api/collectors/register";
+    public const string HeartbeatPath = "api/collectors/heartbeat";
+    public const string SubmitBatchPath = "api/collectors/submit-batch";
+
+    /// <summary>Error codes of the failure report that closes an incomplete snapshot.</summary>
+    public const string BatchLostCode = "COLLECTOR_BATCH_LOST";
+    public const string BatchRejectedCode = "COLLECTOR_BATCH_REJECTED";
+
     /// <summary>Open snapshots older than this are forgotten (the server has failed their jobs long ago).</summary>
     private static readonly TimeSpan SnapshotJobRetention = TimeSpan.FromDays(7);
+
+    /// <summary>Closed snapshots are remembered this long, so a batch delivered twice (a crash before its ack) is recognised.</summary>
+    private static readonly TimeSpan ClosedSnapshotRetention = TimeSpan.FromDays(1);
 
     private readonly HttpClient _httpClient;
     private readonly IOfflineQueue _offlineQueue;
@@ -97,19 +120,29 @@ public class CollectorClient : ICollectorClient
     private readonly string _hostname;
     private readonly string _version;
     private readonly SemaphoreSlim _registrationLock = new(1, 1);
+    private readonly SemaphoreSlim _reportLock = new(1, 1);
     private Guid? _collectorId;
 
-    // Server job id of each open multi-batch snapshot, learned from the
-    // response to its first delivered batch. Persisted, so batches still in
-    // the offline queue reach the right job after a service restart.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SnapshotJob> _snapshotJobs = new();
-    private readonly object _snapshotJobsFileLock = new();
+    // State of each multi-batch snapshot: the server job its first delivered
+    // batch opened, the next sequence due, and whether it was lost. Persisted
+    // (snapshot-jobs.json), so batches still in the offline queue reach the
+    // right job, in sequence, after a service restart.
+    private readonly Dictionary<Guid, SnapshotState> _snapshots = new();
+    private readonly object _snapshotLock = new();
 
     // CPU sampling state: process CPU time and wall clock at the previous heartbeat.
     private TimeSpan? _lastCpuTime;
     private long _lastCpuSampleTimestamp;
 
-    private enum DeliveryOutcome { Accepted, Transient, Rejected }
+    private enum DeliveryOutcome
+    {
+        Accepted,
+        Transient,
+        Rejected,
+
+        /// <summary>Not sent and never will be: its snapshot is lost (or it was already delivered).</summary>
+        Dropped
+    }
 
     public CollectorClient(
         HttpClient httpClient,
@@ -127,6 +160,7 @@ public class CollectorClient : ICollectorClient
             ?? "1.0.0";
         _collectorId = LoadPersistedId();
         LoadSnapshotJobs();
+        _offlineQueue.ItemsDiscarded += OnQueueItemsDiscarded;
     }
 
     public bool IsRegistered => _collectorId.HasValue;
@@ -157,7 +191,7 @@ public class CollectorClient : ICollectorClient
                 supportedAdapters = _options.SupportedAdapters
             };
 
-            using var response = await _httpClient.PostAsJsonAsync("/api/collectors/register", request, cancellationToken);
+            using var response = await _httpClient.PostAsJsonAsync(RegisterPath, request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Collector registration returned {StatusCode}.", (int)response.StatusCode);
@@ -210,7 +244,7 @@ public class CollectorClient : ICollectorClient
 
         try
         {
-            using var response = await _httpClient.PostAsJsonAsync("/api/collectors/heartbeat", heartbeat, cancellationToken);
+            using var response = await _httpClient.PostAsJsonAsync(HeartbeatPath, heartbeat, cancellationToken);
             if (response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("Heartbeat sent successfully from {Hostname}", _hostname);
@@ -248,6 +282,17 @@ public class CollectorClient : ICollectorClient
     {
         var batch = queued.Batch;
 
+        if (IsSequenced(queued, out var snapshotId, out var sequence) && LostReason(snapshotId) is { } lost)
+        {
+            _logger.LogWarning("Batch {Batch} of snapshot {SnapshotId} is not sent: the snapshot is incomplete ({Reason}).",
+                sequence + 1, snapshotId, lost);
+            return BatchDelivery.Rejected;
+        }
+
+        // The service is stopping: keep the batch for the next start instead of losing it.
+        if (cancellationToken.IsCancellationRequested)
+            return await BufferAsync(queued, "the service is stopping");
+
         // Never overtake buffered batches: a later batch must not be ingested before an earlier one.
         if (_offlineQueue.GetQueueDepth(BatchQueue) > 0)
             return await BufferAsync(queued, "older batches are still buffered");
@@ -257,7 +302,13 @@ public class CollectorClient : ICollectorClient
         {
             outcome = await PostBatchAsync(queued, cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Stopping mid-upload: the server either never got the body or ingested it; the
+            // batch is sent again after the restart (the server upserts by external id).
+            return await BufferAsync(queued, "the service is stopping");
+        }
+        catch (Exception ex)
         {
             _logger.LogWarning("Network failure during batch submit ({Message}).", ex.Message);
             outcome = DeliveryOutcome.Transient;
@@ -266,10 +317,14 @@ public class CollectorClient : ICollectorClient
         switch (outcome)
         {
             case DeliveryOutcome.Accepted:
-                _logger.LogInformation("Discovered batch with {NodeCount} nodes submitted successfully", batch.Nodes.Count);
+                _logger.LogInformation("Discovered batch with {NodeCount} nodes and {RelationshipCount} relationships submitted successfully",
+                    batch.Nodes.Count, batch.Relationships.Count);
                 return BatchDelivery.Delivered;
             case DeliveryOutcome.Rejected:
-                _logger.LogError("Server permanently rejected a discovery batch with {NodeCount} nodes; it was not buffered.", batch.Nodes.Count);
+            case DeliveryOutcome.Dropped:
+                _logger.LogError("Discovery batch with {NodeCount} nodes was not accepted; it was not buffered.", batch.Nodes.Count);
+                // The server answered, so the failure report closing the snapshot can go out now.
+                await ReportLostSnapshotsAsync(CancellationToken.None);
                 return BatchDelivery.Rejected;
             default:
                 return await BufferAsync(queued, "server unavailable");
@@ -278,6 +333,10 @@ public class CollectorClient : ICollectorClient
 
     public async Task<bool> DrainOfflineQueueAsync(CancellationToken cancellationToken = default)
     {
+        // Snapshots lost while the server was unreachable are closed first.
+        if (!await ReportLostSnapshotsAsync(cancellationToken))
+            return false;
+
         var depth = _offlineQueue.GetQueueDepth(BatchQueue);
         if (depth == 0)
             return true;
@@ -292,6 +351,7 @@ public class CollectorClient : ICollectorClient
 
             if (item.Payload.Batch == null)
             {
+                // Its snapshot (if any) is caught by the sequence check of its next batch.
                 await _offlineQueue.DeadLetterAsync(BatchQueue, item.Id, "no batch payload", CancellationToken.None);
                 continue;
             }
@@ -320,14 +380,26 @@ public class CollectorClient : ICollectorClient
                     await _offlineQueue.AckAsync(BatchQueue, item.Id, CancellationToken.None);
                     _logger.LogInformation("Successfully drained backlog batch {Id}", item.Id);
                     break;
+                case DeliveryOutcome.Dropped:
+                    await _offlineQueue.AckAsync(BatchQueue, item.Id, CancellationToken.None);
+                    await ReportLostSnapshotsAsync(CancellationToken.None);
+                    break;
                 case DeliveryOutcome.Rejected:
                     await _offlineQueue.DeadLetterAsync(BatchQueue, item.Id, "rejected by server", CancellationToken.None);
                     _logger.LogError("Backlog batch {Id} was rejected by the server and moved to dead-letter.", item.Id);
+                    await ReportLostSnapshotsAsync(CancellationToken.None);
                     break;
                 default:
                     var requeued = await _offlineQueue.ReleaseAsync(BatchQueue, item.Id, countAsFailure: true, CancellationToken.None);
                     if (!requeued)
+                    {
                         _logger.LogError("Backlog batch {Id} exceeded the retry limit and was moved to dead-letter.", item.Id);
+                        if (IsSequenced(item.Payload, out var snapshotId, out var sequence))
+                        {
+                            MarkLost(snapshotId, item.Payload.Batch.IntegrationId,
+                                $"{BatchLostCode}: Batch {sequence + 1} of the snapshot could not be delivered and was moved to the offline queue's dead-letter folder; the snapshot is incomplete and was not applied.");
+                        }
+                    }
                     return false;
             }
         }
@@ -337,52 +409,95 @@ public class CollectorClient : ICollectorClient
 
     private async Task<DeliveryOutcome> PostBatchAsync(QueuedBatch queued, CancellationToken cancellationToken)
     {
-        var jobId = queued.JobId;
-        if (jobId == null && queued.SnapshotId is { } pendingSnapshot &&
-            _snapshotJobs.TryGetValue(pendingSnapshot, out var knownJob))
-            jobId = knownJob.JobId;
+        var sequenced = IsSequenced(queued, out var snapshotId, out var sequence);
+        var state = queued.SnapshotId is { } knownSnapshot ? GetSnapshot(knownSnapshot) : null;
+        var isFailureReport = queued.Final && !queued.Batch.Success;
 
-        if (jobId == null && queued.Sequence > 0)
+        if (sequenced)
         {
-            // The first batch never opened a job (it was rejected or dead-lettered).
-            _logger.LogError(
-                "Batch {Sequence} of snapshot {SnapshotId} has no server job to join; it is dropped. The next discovery run sends a complete snapshot.",
-                queued.Sequence, queued.SnapshotId);
-            return DeliveryOutcome.Rejected;
+            if (state?.Lost != null)
+            {
+                _logger.LogWarning("Batch {Batch} of snapshot {SnapshotId} is dropped: the snapshot is incomplete ({Reason}).",
+                    sequence + 1, snapshotId, state.Lost);
+                return DeliveryOutcome.Dropped;
+            }
+            if (state?.Closed == true)
+            {
+                _logger.LogInformation("Batch {Batch} of snapshot {SnapshotId} was already delivered; it is dropped.", sequence + 1, snapshotId);
+                return DeliveryOutcome.Dropped;
+            }
+
+            // A snapshot nobody knows starts at 0; entries saved before sequences were tracked accept any.
+            int? expected = state == null ? 0 : state.NextSequence;
+            if (expected is { } next && sequence < next)
+            {
+                // Delivered before a crash, but not yet acknowledged in the queue.
+                _logger.LogInformation("Batch {Batch} of snapshot {SnapshotId} was already delivered; it is dropped.", sequence + 1, snapshotId);
+                return DeliveryOutcome.Dropped;
+            }
+            if (expected is { } due && sequence > due)
+            {
+                MarkLost(snapshotId, queued.Batch.IntegrationId, due == sequence - 1
+                    ? $"{BatchLostCode}: Batch {due + 1} of the snapshot never reached the server (evicted from the offline queue or abandoned); the snapshot is incomplete and was not applied."
+                    : $"{BatchLostCode}: Batches {due + 1}-{sequence} of the snapshot never reached the server (evicted from the offline queue or abandoned); the snapshot is incomplete and was not applied.");
+                return DeliveryOutcome.Dropped;
+            }
+            if (sequence > 0 && queued.JobId == null && state?.JobId == null)
+            {
+                // The first batch was delivered, but its job id is unknown: on its own this batch
+                // would open a new job, and a final batch would then mark the rest of the
+                // integration's inventory stale.
+                MarkLost(snapshotId, queued.Batch.IntegrationId,
+                    $"{BatchLostCode}: Batch {sequence + 1} of the snapshot has no server job to join; the snapshot is incomplete and was not applied.");
+                return DeliveryOutcome.Dropped;
+            }
         }
 
+        var jobId = queued.JobId ?? state?.JobId;
         var query = $"?final={(queued.Final ? "true" : "false")}";
         if (jobId.HasValue)
             query += $"&jobId={jobId.Value:D}";
 
-        using var response = await _httpClient.PostAsJsonAsync("/api/collectors/submit-batch" + query, queued.Batch, cancellationToken);
+        using var response = await _httpClient.PostAsJsonAsync(SubmitBatchPath + query, queued.Batch, cancellationToken);
         if (response.IsSuccessStatusCode)
         {
-            if (queued.SnapshotId is { } snapshotId)
+            if (queued.SnapshotId is { } delivered)
             {
-                if (queued.Final)
-                {
-                    if (_snapshotJobs.TryRemove(snapshotId, out _))
-                        SaveSnapshotJobs();
-                }
-                else if (jobId == null && await ReadJobIdAsync(response, cancellationToken) is { } openedJob)
-                {
-                    _snapshotJobs[snapshotId] = new SnapshotJob(openedJob, DateTime.UtcNow);
-                    SaveSnapshotJobs();
-                }
+                var openedJob = jobId ?? (queued.Final ? null : await ReadJobIdAsync(response, CancellationToken.None));
+                RecordDelivery(delivered, queued.Batch.IntegrationId, openedJob, queued.Sequence, queued.Final);
             }
-
             return DeliveryOutcome.Accepted;
         }
 
         var status = (int)response.StatusCode;
-        _logger.LogWarning("Batch submission returned {StatusCode}.", status);
+        var detail = await ReadErrorAsync(response);
+        _logger.LogWarning("Batch submission returned {StatusCode}: {Detail}", status, detail);
 
         // 401/403 are configuration problems (token) and 408/429 are throttling: keep the batch.
-        // Any other 4xx means the server will never accept this payload.
+        // Any other 4xx (413: body over the server's limit included) means the server will never
+        // accept this payload.
         if (status is >= 400 and < 500 and not (401 or 403 or 408 or 429))
+        {
+            if (sequenced && !isFailureReport)
+            {
+                MarkLost(snapshotId, queued.Batch.IntegrationId,
+                    $"{BatchRejectedCode}: The server refused batch {sequence + 1} of the snapshot ({status}{(detail.Length > 0 ? ": " + detail : string.Empty)}); the snapshot is incomplete and was not applied.");
+            }
+            else if (sequenced)
+            {
+                // A refused failure report cannot be reported again.
+                UpdateSnapshot(snapshotId, s => (s ?? NewState(queued.Batch.IntegrationId)) with { Closed = true, RecordedAt = DateTime.UtcNow });
+            }
             return DeliveryOutcome.Rejected;
+        }
         return DeliveryOutcome.Transient;
+    }
+
+    private static bool IsSequenced(QueuedBatch queued, out Guid snapshotId, out int sequence)
+    {
+        snapshotId = queued.SnapshotId ?? Guid.Empty;
+        sequence = queued.Sequence ?? -1;
+        return queued.SnapshotId.HasValue && queued.Sequence is >= 0;
     }
 
     private static async Task<Guid?> ReadJobIdAsync(HttpResponseMessage response, CancellationToken cancellationToken)
@@ -400,25 +515,247 @@ public class CollectorClient : ICollectorClient
         }
     }
 
-    private async Task<BatchDelivery> BufferAsync(QueuedBatch queued, string reason)
+    /// <summary>The server's message (problem details "detail"/"title" or { message }), shortened.</summary>
+    private static async Task<string> ReadErrorAsync(HttpResponseMessage response)
     {
-        // Buffering is local bookkeeping and must not be skipped because of cancellation.
-        var accepted = await _offlineQueue.EnqueueAsync(BatchQueue, queued, CancellationToken.None);
-        if (accepted)
+        string text;
+        try
         {
-            _logger.LogWarning("Discovery batch buffered to local offline queue ({Reason}).", reason);
-            return BatchDelivery.Buffered;
+            text = await response.Content.ReadAsStringAsync(CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException)
+        {
+            return string.Empty;
         }
 
-        _logger.LogError("Discovery batch dropped: offline queue disk quota exceeded.");
-        return BatchDelivery.Rejected;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            foreach (var name in new[] { "message", "detail", "title" })
+            {
+                if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                    doc.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+                {
+                    text = value.GetString() ?? string.Empty;
+                    break;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Plain text body.
+        }
+
+        text = text.ReplaceLineEndings(" ").Trim();
+        return text.Length > 200 ? text[..200] + "..." : text;
+    }
+
+    private async Task<BatchDelivery> BufferAsync(QueuedBatch queued, string reason)
+    {
+        var sequenced = IsSequenced(queued, out var snapshotId, out var sequence);
+
+        // Buffering is local bookkeeping and must not be skipped because of cancellation.
+        var accepted = sequenced
+            ? await _offlineQueue.EnqueueAsync(BatchQueue, queued, QueueTag(queued.Batch.IntegrationId, snapshotId, sequence), CancellationToken.None)
+            : await _offlineQueue.EnqueueAsync(BatchQueue, queued, CancellationToken.None);
+        if (!accepted)
+        {
+            _logger.LogError("Discovery batch dropped: offline queue disk quota exceeded.");
+            if (sequenced)
+            {
+                MarkLost(snapshotId, queued.Batch.IntegrationId,
+                    $"{BatchLostCode}: Batch {sequence + 1} of the snapshot did not fit into the offline queue's disk quota ({_options.QueueMaxDiskMb} MB); the snapshot is incomplete and was not applied.");
+            }
+            return BatchDelivery.Rejected;
+        }
+
+        _logger.LogWarning("Discovery batch buffered to local offline queue ({Reason}).", reason);
+        // Making room for it may have evicted an earlier batch of the same snapshot.
+        return sequenced && LostReason(snapshotId) != null ? BatchDelivery.Rejected : BatchDelivery.Buffered;
     }
 
     // ---------------------------------------------------------------------
-    // Open snapshot → server job map
+    // Snapshot state: job id, next sequence, losses (snapshot-jobs.json)
     // ---------------------------------------------------------------------
 
-    private sealed record SnapshotJob(Guid JobId, DateTime RecordedAt);
+    private sealed record SnapshotState
+    {
+        public Guid IntegrationId { get; init; }
+
+        /// <summary>Server job opened by the first delivered batch.</summary>
+        public Guid? JobId { get; init; }
+
+        /// <summary>Sequence of the next batch due; null in entries saved before sequences were tracked.</summary>
+        public int? NextSequence { get; init; }
+
+        public DateTime RecordedAt { get; init; }
+
+        /// <summary>The final batch (or the failure report) was delivered.</summary>
+        public bool Closed { get; init; }
+
+        /// <summary>Failure report error of a lost snapshot; null while the snapshot is intact.</summary>
+        public string? Lost { get; init; }
+
+        public bool FailureReported { get; init; }
+    }
+
+    private static SnapshotState NewState(Guid? integrationId) => new()
+    {
+        IntegrationId = integrationId ?? Guid.Empty,
+        NextSequence = 0,
+        RecordedAt = DateTime.UtcNow
+    };
+
+    /// <summary>"{integration}-{snapshot}-{sequence}": what a discarded queue item belonged to.</summary>
+    private static string QueueTag(Guid? integrationId, Guid snapshotId, int sequence) =>
+        $"{integrationId ?? Guid.Empty:N}-{snapshotId:N}-{sequence}";
+
+    private void OnQueueItemsDiscarded(object? sender, DiscardedQueueItem item)
+    {
+        if (item.QueueName != BatchQueue || item.Tag is not { } tag)
+            return;
+
+        var parts = tag.Split('-');
+        if (parts.Length != 3 ||
+            !Guid.TryParseExact(parts[0], "N", out var integrationId) ||
+            !Guid.TryParseExact(parts[1], "N", out var snapshotId) ||
+            !int.TryParse(parts[2], out var sequence))
+            return;
+
+        MarkLost(snapshotId, integrationId == Guid.Empty ? null : integrationId,
+            $"{BatchLostCode}: Batch {sequence + 1} of the snapshot was lost from the offline queue ({item.Reason}) while the server was unreachable; the snapshot is incomplete and was not applied.");
+    }
+
+    private SnapshotState? GetSnapshot(Guid snapshotId)
+    {
+        lock (_snapshotLock)
+            return _snapshots.GetValueOrDefault(snapshotId);
+    }
+
+    private string? LostReason(Guid snapshotId) => GetSnapshot(snapshotId)?.Lost;
+
+    /// <summary>Applies <paramref name="update"/> (null removes the entry) and saves the file.</summary>
+    private void UpdateSnapshot(Guid snapshotId, Func<SnapshotState?, SnapshotState?> update)
+    {
+        lock (_snapshotLock)
+        {
+            var updated = update(_snapshots.GetValueOrDefault(snapshotId));
+            if (updated == null)
+                _snapshots.Remove(snapshotId);
+            else
+                _snapshots[snapshotId] = updated;
+            SaveSnapshotJobs();
+        }
+    }
+
+    private void RecordDelivery(Guid snapshotId, Guid? integrationId, Guid? jobId, int? sequence, bool final)
+    {
+        UpdateSnapshot(snapshotId, current =>
+        {
+            var state = current ?? NewState(integrationId);
+            return state with
+            {
+                IntegrationId = state.IntegrationId == Guid.Empty ? integrationId ?? Guid.Empty : state.IntegrationId,
+                JobId = state.JobId ?? jobId,
+                NextSequence = sequence is { } delivered ? delivered + 1 : state.NextSequence,
+                Closed = state.Closed || final,
+                RecordedAt = DateTime.UtcNow
+            };
+        });
+    }
+
+    /// <summary>
+    /// Marks a snapshot incomplete: its remaining batches are dropped and its job is closed with a
+    /// failure report carrying <paramref name="error"/> (see <see cref="ReportLostSnapshotsAsync"/>).
+    /// The first loss wins; a closed snapshot is left alone.
+    /// </summary>
+    private void MarkLost(Guid snapshotId, Guid? integrationId, string error)
+    {
+        var marked = false;
+        UpdateSnapshot(snapshotId, current =>
+        {
+            var state = current ?? NewState(integrationId);
+            if (state.Lost != null || state.Closed)
+                return current;
+            marked = true;
+            return state with
+            {
+                IntegrationId = state.IntegrationId == Guid.Empty ? integrationId ?? Guid.Empty : state.IntegrationId,
+                Lost = error,
+                FailureReported = false,
+                RecordedAt = DateTime.UtcNow
+            };
+        });
+        if (marked)
+        {
+            _logger.LogError(
+                "Snapshot {SnapshotId} of integration {IntegrationId} is incomplete; its remaining batches are dropped and the server job is closed as failed. {Error}",
+                snapshotId, integrationId, error);
+        }
+    }
+
+    /// <summary>
+    /// Sends the failure report of every lost snapshot not reported yet: a final batch with
+    /// Success=false to the snapshot's job (or, when no batch reached the server, on a new job),
+    /// so the job fails, the integration shows the error and nothing is marked stale. Returns
+    /// false when the server could not be reached; the reports are retried on the next drain.
+    /// </summary>
+    private async Task<bool> ReportLostSnapshotsAsync(CancellationToken cancellationToken)
+    {
+        List<KeyValuePair<Guid, SnapshotState>> pending;
+        lock (_snapshotLock)
+            pending = _snapshots.Where(p => p.Value.Lost != null && !p.Value.FailureReported).ToList();
+        if (pending.Count == 0)
+            return true;
+
+        await _reportLock.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var (snapshotId, state) in pending)
+            {
+                if (GetSnapshot(snapshotId) is not { Lost: not null, FailureReported: false })
+                    continue;
+
+                if (state.IntegrationId == Guid.Empty)
+                {
+                    _logger.LogError("Snapshot {SnapshotId} is incomplete but its integration is unknown; no failure report is sent.", snapshotId);
+                    UpdateSnapshot(snapshotId, s => s == null ? null : s with { FailureReported = true });
+                    continue;
+                }
+
+                var report = CollectorDiscoveryRunner.BuildFailureBatch(state.IntegrationId, new[] { state.Lost! });
+                var query = "?final=true" + (state.JobId is { } jobId ? $"&jobId={jobId:D}" : string.Empty);
+                int status;
+                try
+                {
+                    using var response = await _httpClient.PostAsJsonAsync(SubmitBatchPath + query, report, cancellationToken);
+                    status = (int)response.StatusCode;
+                    if (!response.IsSuccessStatusCode)
+                        _logger.LogWarning("Failure report for snapshot {SnapshotId} returned {StatusCode}: {Detail}", snapshotId, status, await ReadErrorAsync(response));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning("Failure report for snapshot {SnapshotId} could not be sent ({Message}); it is retried later.", snapshotId, ex.Message);
+                    return false;
+                }
+
+                if (status is (>= 200 and < 300) or (>= 400 and < 500 and not (401 or 403 or 408 or 429)))
+                {
+                    // Sent, or refused for good (for example the server already failed the job).
+                    UpdateSnapshot(snapshotId, s => s == null ? null : s with { FailureReported = true, RecordedAt = DateTime.UtcNow });
+                    if (status < 300)
+                        _logger.LogInformation("Reported incomplete snapshot {SnapshotId} of integration {IntegrationId} to the server.", snapshotId, state.IntegrationId);
+                    continue;
+                }
+                return false;
+            }
+            return true;
+        }
+        finally
+        {
+            _reportLock.Release();
+        }
+    }
 
     private string SnapshotJobsFile => Path.Combine(_options.DataDirectory, "snapshot-jobs.json");
 
@@ -428,12 +765,14 @@ public class CollectorClient : ICollectorClient
         {
             if (!File.Exists(SnapshotJobsFile))
                 return;
-            var saved = JsonSerializer.Deserialize<Dictionary<Guid, SnapshotJob>>(File.ReadAllText(SnapshotJobsFile));
-            var cutoff = DateTime.UtcNow - SnapshotJobRetention;
-            foreach (var (snapshotId, job) in saved ?? new())
+            var saved = JsonSerializer.Deserialize<Dictionary<Guid, SnapshotState>>(File.ReadAllText(SnapshotJobsFile));
+            lock (_snapshotLock)
             {
-                if (job != null && job.RecordedAt >= cutoff)
-                    _snapshotJobs[snapshotId] = job;
+                foreach (var (snapshotId, state) in saved ?? new())
+                {
+                    if (state != null && !Expired(state, DateTime.UtcNow))
+                        _snapshots[snapshotId] = state;
+                }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -442,17 +781,28 @@ public class CollectorClient : ICollectorClient
         }
     }
 
+    private static bool Expired(SnapshotState state, DateTime now)
+    {
+        // A loss not reported yet is kept until it is.
+        if (state.Lost != null && !state.FailureReported)
+            return false;
+        var retention = state.Closed || state.FailureReported ? ClosedSnapshotRetention : SnapshotJobRetention;
+        return state.RecordedAt < now - retention;
+    }
+
+    /// <summary>Caller holds <see cref="_snapshotLock"/>.</summary>
     private void SaveSnapshotJobs()
     {
+        var now = DateTime.UtcNow;
+        foreach (var expired in _snapshots.Where(p => Expired(p.Value, now)).Select(p => p.Key).ToList())
+            _snapshots.Remove(expired);
+
         try
         {
-            lock (_snapshotJobsFileLock)
-            {
-                Directory.CreateDirectory(_options.DataDirectory);
-                var temp = SnapshotJobsFile + ".tmp";
-                File.WriteAllText(temp, JsonSerializer.Serialize(_snapshotJobs.ToDictionary(p => p.Key, p => p.Value)));
-                File.Move(temp, SnapshotJobsFile, overwrite: true);
-            }
+            Directory.CreateDirectory(_options.DataDirectory);
+            var temp = SnapshotJobsFile + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(_snapshots));
+            File.Move(temp, SnapshotJobsFile, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -460,6 +810,7 @@ public class CollectorClient : ICollectorClient
             _logger.LogWarning("Could not save the open snapshot list {File}: {Message}", SnapshotJobsFile, ex.Message);
         }
     }
+
 
     // ---------------------------------------------------------------------
     // Identity persistence

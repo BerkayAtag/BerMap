@@ -81,13 +81,19 @@ public sealed class InventoryService : IInventoryService
         }
 
         var totalCount = await query.CountAsync(cancellationToken);
-        var nodes = await query
-            .OrderBy(n => n.Name.ToLower())
-            .ThenBy(n => n.Name)
-            .ThenBy(n => n.Id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync(cancellationToken);
+
+        // Computed in long: (page - 1) * pageSize overflows int for a large
+        // page number and PostgreSQL rejects the resulting negative OFFSET.
+        var skip = (page - 1L) * pageSize;
+        var nodes = skip >= totalCount
+            ? new List<InfrastructureNode>()
+            : await query
+                .OrderBy(n => n.Name.ToLower())
+                .ThenBy(n => n.Name)
+                .ThenBy(n => n.Id)
+                .Skip((int)skip)
+                .Take(pageSize)
+                .ToListAsync(cancellationToken);
 
         var nodeIds = nodes.Select(n => n.Id).ToList();
         var links = nodeIds.Count == 0

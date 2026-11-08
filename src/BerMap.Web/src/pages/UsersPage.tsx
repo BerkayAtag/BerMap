@@ -49,6 +49,7 @@ export const UsersPage: React.FC = () => {
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((state) => state.user);
   const refreshProfile = useAuthStore((state) => state.refreshProfile);
+  const logout = useAuthStore((state) => state.logout);
   const isAdmin = currentUser?.role === ROLES.PlatformAdministrator;
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -106,7 +107,13 @@ export const UsersPage: React.FC = () => {
           roleLabel={roleLabel}
           onClose={() => setDialog(null)}
           onSaved={(user) => {
-            // Editing yourself (role, name) changes what the console may show.
+            if (user.id === currentUser?.id && user.role !== dialog.user.role) {
+              // The server revoked this session's token with the role change:
+              // sign out now and say why, instead of failing on the next request.
+              logout('role_changed');
+              return;
+            }
+            // Editing your own name changes what the console shows.
             if (user.id === currentUser?.id) void refreshProfile();
             handleSaved(isTr ? `${user.username} güncellendi.` : `${user.username} was updated.`);
           }}
@@ -116,14 +123,20 @@ export const UsersPage: React.FC = () => {
         <ResetPasswordDialog
           isTr={isTr}
           user={dialog.user}
+          isSelf={dialog.user.id === currentUser?.id}
           onClose={() => setDialog(null)}
-          onSaved={() =>
+          onSaved={() => {
+            if (dialog.user.id === currentUser?.id) {
+              // A reset revokes every token of the account, this session's too.
+              logout('password_reset');
+              return;
+            }
             handleSaved(
               isTr
                 ? `${dialog.user.username} için parola sıfırlandı. Yeni parolayı kullanıcıya güvenli bir kanaldan iletin.`
                 : `The password of ${dialog.user.username} was reset. Share it with the user over a secure channel.`,
-            )
-          }
+            );
+          }}
         />
       )}
 
@@ -473,6 +486,8 @@ const EditUserDialog: React.FC<EditUserDialogProps> = ({ isTr, user, isSelf, rol
   const [isActive, setIsActive] = useState(user.isActive);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** Changing your own role revokes your session: saving signs you out. */
+  const signsOut = isSelf && role !== user.role;
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -516,7 +531,7 @@ const EditUserDialog: React.FC<EditUserDialogProps> = ({ isTr, user, isSelf, rol
           </Button>
           <Button variant="primary" size="sm" type="submit" form={formId} disabled={saving}>
             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isTr ? 'Kaydet' : 'Save'}
+            {signsOut ? (isTr ? 'Kaydet ve Oturumu Kapat' : 'Save and Sign Out') : (isTr ? 'Kaydet' : 'Save')}
           </Button>
         </>
       }
@@ -548,12 +563,18 @@ const EditUserDialog: React.FC<EditUserDialogProps> = ({ isTr, user, isSelf, rol
               </option>
             ))}
           </select>
-          {isSelf && role !== ROLES.PlatformAdministrator && user.role === ROLES.PlatformAdministrator && (
-            <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
-              {isTr
-                ? 'Kendi yönetici rolünüzü kaldırırsanız bu sayfaya erişiminizi kaybedersiniz.'
-                : 'Removing your own administrator role takes away your access to this page.'}
-            </p>
+          {signsOut && (
+            <div className="mt-2">
+              <MessageBanner tone="warning">
+                {isTr
+                  ? 'Kendi rolünüzü değiştiriyorsunuz. Kaydettiğinizde oturumunuz kapatılır; yeni rolünüzle yeniden giriş yapmanız gerekir.'
+                  : 'You are changing your own role. Saving signs you out; you then sign in again with the new role.'}
+                {role !== ROLES.PlatformAdministrator && user.role === ROLES.PlatformAdministrator &&
+                  (isTr
+                    ? ' Yönetici rolünüzü kaldırdığınız için bu sayfaya da erişemezsiniz.'
+                    : ' Without the administrator role you also lose access to this page.')}
+              </MessageBanner>
+            </div>
           )}
         </div>
         <label className="flex items-start gap-2 text-sm text-neutral-700 dark:text-neutral-300">
@@ -583,11 +604,13 @@ const EditUserDialog: React.FC<EditUserDialogProps> = ({ isTr, user, isSelf, rol
 interface ResetPasswordDialogProps {
   isTr: boolean;
   user: UserAccount;
+  /** Resetting your own password revokes your session: it signs you out. */
+  isSelf: boolean;
   onClose: () => void;
   onSaved: () => void;
 }
 
-const ResetPasswordDialog: React.FC<ResetPasswordDialogProps> = ({ isTr, user, onClose, onSaved }) => {
+const ResetPasswordDialog: React.FC<ResetPasswordDialogProps> = ({ isTr, user, isSelf, onClose, onSaved }) => {
   const fieldId = useId();
   const formId = `${fieldId}-form`;
   const [password, setPassword] = useState('');
@@ -627,13 +650,22 @@ const ResetPasswordDialog: React.FC<ResetPasswordDialogProps> = ({ isTr, user, o
           </Button>
           <Button variant="primary" size="sm" type="submit" form={formId} disabled={saving}>
             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isTr ? 'Parolayı Sıfırla' : 'Reset Password'}
+            {isSelf
+              ? (isTr ? 'Sıfırla ve Oturumu Kapat' : 'Reset and Sign Out')
+              : (isTr ? 'Parolayı Sıfırla' : 'Reset Password')}
           </Button>
         </>
       }
     >
       <form id={formId} onSubmit={(event) => void handleSubmit(event)} className="space-y-4" noValidate>
         {error && <MessageBanner tone="error">{error}</MessageBanner>}
+        {isSelf && (
+          <MessageBanner tone="warning">
+            {isTr
+              ? 'Kendi parolanızı sıfırlıyorsunuz. Sıfırlama tüm oturumlarınızı, bu oturumu da kapatır; yeni parolayla yeniden giriş yapmanız gerekir. Oturumunuz açık kalsın istiyorsanız kullanıcı menüsündeki "Parolayı değiştir" seçeneğini kullanın.'
+              : 'You are resetting your own password. A reset ends all of your sessions, this one included; you then sign in again with the new password. To stay signed in, use "Change password" in the user menu instead.'}
+          </MessageBanner>
+        )}
         <div>
           <label htmlFor={`${fieldId}-password`} className={labelClass}>
             {isTr ? 'Yeni Parola' : 'New Password'}

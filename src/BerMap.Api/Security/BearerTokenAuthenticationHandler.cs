@@ -107,7 +107,6 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)
     {
         Response.StatusCode = StatusCodes.Status401Unauthorized;
-        Response.ContentType = "application/problem+json";
         return Response.WriteAsJsonAsync(new
         {
             type = "https://bermap.local/errors/unauthorized",
@@ -115,13 +114,12 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
             status = StatusCodes.Status401Unauthorized,
             code = "unauthorized",
             traceId = Context.TraceIdentifier
-        });
+        }, options: null, contentType: "application/problem+json");
     }
 
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties)
     {
         Response.StatusCode = StatusCodes.Status403Forbidden;
-        Response.ContentType = "application/problem+json";
         return Response.WriteAsJsonAsync(new
         {
             type = "https://bermap.local/errors/forbidden",
@@ -129,6 +127,6 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
             status = StatusCodes.Status403Forbidden,
             code = "forbidden",
             traceId = Context.TraceIdentifier
-        });
+        }, options: null, contentType: "application/problem+json");
     }
 }

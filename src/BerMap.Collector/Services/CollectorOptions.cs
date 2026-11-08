@@ -8,7 +8,8 @@ namespace BerMap.Collector.Services;
 
 /// <summary>
 /// Collector settings bound from configuration:
-///   BerMap:ServerUrl                     BerMap server base URL (outbound HTTPS only)
+///   BerMap:ServerUrl                     BerMap server base URL (outbound HTTPS only); a path
+///                                        prefix (https://proxy/bermap) is kept
 ///   BerMap:Collector:EnrollmentToken     shared token sent as X-BerMap-Enrollment-Token on every request
 ///   BerMap:Collector:DataDirectory       writable folder for the collector id and offline queue
 ///   BerMap:Collector:QueueMaxDiskMb      disk quota for the offline queue
@@ -16,6 +17,9 @@ namespace BerMap.Collector.Services;
 ///   BerMap:Collector:SupportedAdapters   adapter types advertised at registration, in addition
 ///                                        to the adapter types of the configured integrations
 ///   BerMap:Collector:BatchSize           nodes per submit-batch request (default 500)
+///   BerMap:Collector:RelationshipBatchSize relationships per submit-batch request (default 5000)
+///   BerMap:Collector:MaxBatchMb          serialized size limit of one submit-batch request
+///                                        (default 8 MB; the server refuses bodies over 30 MB)
 ///   BerMap:Collector:Integrations        integrations discovered by this collector, see
 ///                                        <see cref="CollectorIntegration"/>
 /// </summary>
@@ -31,12 +35,44 @@ public sealed class CollectorOptions
     public List<string> SupportedAdapters { get; set; } = new();
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
     public int BatchSize { get; set; } = DefaultBatchSize;
+    public int RelationshipBatchSize { get; set; } = DefaultRelationshipBatchSize;
+    public int MaxBatchMb { get; set; } = DefaultMaxBatchMb;
 
     public const int DefaultBatchSize = 500;
     public const int MaxBatchSize = 10000;
+    public const int DefaultRelationshipBatchSize = 5000;
+    public const int MaxRelationshipBatchSize = 50000;
+    public const int DefaultMaxBatchMb = 8;
+    /// <summary>Stays below the server's 30,000,000-byte request body limit.</summary>
+    public const int MaxMaxBatchMb = 24;
+
+    public long MaxBatchBytes => MaxBatchMb * 1024L * 1024L;
 
     public string OfflineQueueDirectory => Path.Combine(DataDirectory, "offline_queue");
     public string CollectorIdFile => Path.Combine(DataDirectory, "collector-id");
+
+    /// <summary>
+    /// <see cref="ServerUrl"/> as the HttpClient base address. The trailing slash
+    /// keeps a path prefix (https://proxy.corp.local/bermap/): requests use relative
+    /// paths ("api/collectors/register"), which resolve below it.
+    /// </summary>
+    public Uri ServerBaseAddress => ToBaseAddress(ServerUrl);
+
+    public static Uri ToBaseAddress(string serverUrl)
+    {
+        if (!Uri.TryCreate((serverUrl ?? string.Empty).Trim(), UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) ||
+            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            throw new InvalidOperationException(
+                $"BerMap:ServerUrl '{serverUrl}' is not a valid server address (expected https://host[:port][/path]).");
+        }
+
+        var builder = new UriBuilder(uri);
+        if (!builder.Path.EndsWith('/'))
+            builder.Path += "/";
+        return builder.Uri;
+    }
 
     /// <summary>
     /// Adds the adapter types of the configured integrations to the advertised
@@ -62,6 +98,10 @@ public sealed class CollectorOptions
             options.Name = Environment.MachineName;
         options.QueueMaxDiskMb = Math.Max(1, options.QueueMaxDiskMb);
         options.BatchSize = options.BatchSize <= 0 ? DefaultBatchSize : Math.Min(options.BatchSize, MaxBatchSize);
+        options.RelationshipBatchSize = options.RelationshipBatchSize <= 0
+            ? DefaultRelationshipBatchSize
+            : Math.Min(options.RelationshipBatchSize, MaxRelationshipBatchSize);
+        options.MaxBatchMb = options.MaxBatchMb <= 0 ? DefaultMaxBatchMb : Math.Min(options.MaxBatchMb, MaxMaxBatchMb);
         options.SupportedAdapters = (options.SupportedAdapters ?? new List<string>())
             .Where(a => !string.IsNullOrWhiteSpace(a))
             .Select(a => a.Trim())

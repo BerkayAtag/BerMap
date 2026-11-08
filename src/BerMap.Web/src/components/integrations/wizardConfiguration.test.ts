@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createConfiguration,
+  endpointChanged,
+  ldapDefaultPort,
+  ldapPortForTransport,
+  ldapPortMismatch,
   updateConfiguration,
   type ConfigurationFields,
 } from './wizardConfiguration.ts';
@@ -76,4 +80,39 @@ test('an edit does not add defaults the saved configuration lacks', () => {
 
 test('an edit tolerates a missing saved configuration', () => {
   assert.deepEqual(updateConfiguration(undefined, vmwareForm, { ...vmwareForm, port: 8443 }), { port: 8443 });
+});
+
+test('switching LDAPS and StartTLS/plaintext moves a standard port with the transport', () => {
+  assert.equal(ldapPortForTransport(636, false), 389);
+  assert.equal(ldapPortForTransport(389, true), 636);
+  assert.equal(ldapPortForTransport(636, true), 636);
+  assert.equal(ldapDefaultPort(true), 636);
+  assert.equal(ldapDefaultPort(false), 389);
+});
+
+test('a port the user typed is kept when the transport changes', () => {
+  assert.equal(ldapPortForTransport(3269, false), 3269);
+  assert.equal(ldapPortForTransport(10389, true), 10389);
+});
+
+test('ldapPortMismatch flags StartTLS on 636 and LDAPS on 389 only', () => {
+  assert.equal(ldapPortMismatch(636, false), true);
+  assert.equal(ldapPortMismatch(389, true), true);
+  assert.equal(ldapPortMismatch(389, false), false);
+  assert.equal(ldapPortMismatch(3268, false), false);
+});
+
+test('endpointChanged: server, port, username and TLS changes need a new secret', () => {
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm }), false);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, collectMetrics: false }), false);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, server: 'evil.example' }), true);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, server: ' vcenter.corp.local ' }), false);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, port: 8443 }), true);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, username: 'other' }), true);
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, allowUntrustedCertificate: true }), true);
+  // VMware has no LDAP transport keys; their form values do not count.
+  assert.equal(endpointChanged(vmwareForm, { ...vmwareForm, useStartTls: true }), false);
+  assert.equal(endpointChanged(adForm, { ...adForm, useSsl: false, useStartTls: true }), true);
+  assert.equal(endpointChanged(adForm, { ...adForm, allowPlaintext: true }), true);
+  assert.equal(endpointChanged(adForm, { ...adForm, baseDn: 'DC=corp,DC=local' }), false);
 });

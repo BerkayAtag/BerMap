@@ -2,11 +2,12 @@ import React, { useId, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { Lock, User as UserIcon, ShieldCheck } from 'lucide-react';
+import { Info, Lock, User as UserIcon, ShieldCheck } from 'lucide-react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useLocale } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import { loginErrorText, requiredFieldsText, signOutReasonText } from '@/components/auth/loginText';
 import type { ApiError, User } from '@/types';
 
 function getRedirectTarget(state: unknown): string {
@@ -25,6 +26,7 @@ export const LoginPage: React.FC = () => {
   const location = useLocation();
   const login = useAuthStore((state) => state.login);
   const token = useAuthStore((state) => state.token);
+  const signOutReason = useAuthStore((state) => state.signOutReason);
   const usernameId = useId();
   const passwordId = useId();
   const errorId = useId();
@@ -38,7 +40,7 @@ export const LoginPage: React.FC = () => {
     e.preventDefault();
     setError(null);
     if (!username.trim() || !password.trim()) {
-      setError(isTr ? 'Kullanıcı adı ve parola zorunludur.' : 'Username and password are required.');
+      setError(requiredFieldsText(isTr));
       return;
     }
     setSubmitting(true);
@@ -52,26 +54,7 @@ export const LoginPage: React.FC = () => {
       setSubmitting(false);
       navigate(redirectTo, { replace: true });
     } catch (err) {
-      const apiError = err as Partial<ApiError>;
-      if (apiError?.status === 429) {
-        setError(
-          apiError.message && apiError.message !== 'Too Many Requests'
-            ? apiError.message
-            : isTr
-              ? 'Çok fazla giriş denemesi. Lütfen bir dakika sonra tekrar deneyin.'
-              : 'Too many sign-in attempts. Please try again in a minute.',
-        );
-      } else if (apiError?.status === 401) {
-        setError(
-          apiError.message && apiError.message !== 'Unauthorized'
-            ? apiError.message
-            : isTr
-              ? 'Kullanıcı adı veya parola hatalı.'
-              : 'Invalid username or password.',
-        );
-      } else {
-        setError(apiError?.message || (isTr ? 'Giriş başarısız.' : 'Login failed.'));
-      }
+      setError(loginErrorText(err as Partial<ApiError>, isTr));
       setSubmitting(false);
     }
   };
@@ -91,6 +74,16 @@ export const LoginPage: React.FC = () => {
             Enterprise Infrastructure Intelligence
           </p>
         </div>
+
+        {signOutReason && !error && (
+          <div
+            role="status"
+            className="mb-4 p-3 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/30 text-sm text-blue-800 dark:text-blue-300 flex items-start gap-2"
+          >
+            <Info className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+            <span>{signOutReasonText(signOutReason, isTr)}</span>
+          </div>
+        )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>

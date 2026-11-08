@@ -29,6 +29,10 @@ const API_ERROR_MESSAGES: Record<string, Text> = {
     en: 'Enter only a host name or IP as the server; do not include https:// or a path (/sdk).',
   },
   SECRET_REQUIRED: { tr: 'Bu adaptör için parola / secret zorunludur.', en: 'A password / secret is required for this adapter.' },
+  SECRET_REQUIRED_FOR_ENDPOINT_CHANGE: {
+    tr: 'Sunucu, port, kullanıcı adı veya TLS ayarı değişti: kayıtlı parola yeni uç noktaya gönderilmez. Kaydetmek için parolayı / secret\'ı yeniden girin.',
+    en: 'The server, port, username or TLS settings changed, so the stored password is not sent to the new endpoint. Enter the password / secret again to save.',
+  },
   SECRET_IN_CONFIGURATION: {
     tr: 'Parolalar konfigürasyon alanlarına yazılamaz; parola alanını kullanın.',
     en: 'Secrets must not be placed in configuration fields; use the password field.',

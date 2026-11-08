@@ -21,6 +21,18 @@ namespace BerMap.Infrastructure.Services;
 
 public sealed class IntegrationService : IIntegrationService
 {
+    /// <summary>
+    /// Configuration keys that decide where the stored credential is sent and
+    /// how it is protected in transit. Changing any of them requires the
+    /// secret to be entered again.
+    /// </summary>
+    private static readonly HashSet<string> EndpointIdentityKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "server", "host", "hostname", "port", "url", "baseUrl", "endpoint", "username", "domain",
+        "useSsl", "useStartTls", "allowPlaintext", "allowUntrustedCertificate", "ignoreSslErrors",
+        "additionalDomains"
+    };
+
     private static readonly HashSet<string> CommonSecretKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "password", "secret", "token", "apikey", "api_key", "clientsecret", "client_secret",
@@ -212,6 +224,25 @@ public sealed class IntegrationService : IIntegrationService
         var secretRotated = !request.ClearSecret && !string.IsNullOrWhiteSpace(request.Secret);
         var secretCleared = request.ClearSecret && !string.IsNullOrWhiteSpace(integration.CredentialReference);
 
+        // The stored secret was entered for one endpoint and account. Pointing
+        // the integration elsewhere (another server or port, another account,
+        // weaker TLS) and then testing it would send that secret to the new
+        // endpoint, so such a change needs the secret entered again (or the
+        // stored one cleared).
+        var endpointKeysChanged = configurationKeysChanged
+            .Where(key => EndpointIdentityKeys.Contains(key))
+            .ToList();
+        if (endpointKeysChanged.Count > 0 &&
+            !string.IsNullOrWhiteSpace(integration.CredentialReference) &&
+            !secretRotated &&
+            !request.ClearSecret)
+        {
+            throw new IntegrationValidationException(
+                "SECRET_REQUIRED_FOR_ENDPOINT_CHANGE",
+                $"Changing {string.Join(", ", endpointKeysChanged)} requires entering the credential again; " +
+                "the stored credential is not sent to a changed endpoint.");
+        }
+
         if (collectorManaged != integration.CollectorManaged)
         {
             // Switching back to server-side discovery needs a credential the
@@ -274,6 +305,7 @@ public sealed class IntegrationService : IIntegrationService
                 integration.ConfigurationVersion,
                 changes,
                 configurationKeysChanged,
+                endpointKeysChanged,
                 secretRotated,
                 secretCleared
             }),

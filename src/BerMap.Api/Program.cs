@@ -220,6 +220,15 @@ app.UseExceptionHandler(errorApp =>
                 StatusCodes.Status409Conflict, conflict.Message, conflict.Code),
             IntegrationValidationException validation => (
                 StatusCodes.Status400BadRequest, validation.Message, validation.Code),
+            // Raised by the server while reading the request, e.g. a body over
+            // Kestrel's MaxRequestBodySize (413). Its status is a client error,
+            // not a 500 the caller would retry.
+            Microsoft.AspNetCore.Http.BadHttpRequestException badRequest => (
+                badRequest.StatusCode,
+                badRequest.Message,
+                badRequest.StatusCode == StatusCodes.Status413PayloadTooLarge
+                    ? "request_body_too_large"
+                    : "bad_request"),
             ArgumentException argument => (
                 StatusCodes.Status400BadRequest, argument.Message, "invalid_request"),
             KeyNotFoundException notFound => (
@@ -244,7 +253,8 @@ app.UseExceptionHandler(errorApp =>
         }
 
         context.Response.StatusCode = status;
-        context.Response.ContentType = "application/problem+json";
+        // WriteAsJsonAsync sets its own content type (application/json)
+        // unless one is passed.
         await context.Response.WriteAsJsonAsync(new
         {
             type = $"https://bermap.local/errors/{code}",
@@ -252,7 +262,7 @@ app.UseExceptionHandler(errorApp =>
             status,
             code,
             traceId = context.TraceIdentifier
-        });
+        }, options: null, contentType: "application/problem+json");
     });
 });
 

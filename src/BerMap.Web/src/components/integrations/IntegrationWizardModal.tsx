@@ -1,8 +1,10 @@
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { CopyIdField } from '@/components/ui/CopyableId';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import {
   X,
   CheckCircle2,
@@ -21,7 +23,14 @@ import {
   validateCron,
   validateServer,
 } from '@/components/integrations/integrationText';
-import { createConfiguration, updateConfiguration } from '@/components/integrations/wizardConfiguration';
+import {
+  createConfiguration,
+  endpointChanged,
+  ldapDefaultPort,
+  ldapPortForTransport,
+  ldapPortMismatch,
+  updateConfiguration,
+} from '@/components/integrations/wizardConfiguration';
 import type {
   AdapterDescriptor,
   ApiError,
@@ -88,6 +97,7 @@ const ERROR_CODE_FIELD: Record<string, FieldKey> = {
   CONFIG_INVALID_SERVER: 'server',
   CONFIG_REQUIRED: 'server',
   SECRET_REQUIRED: 'secret',
+  SECRET_REQUIRED_FOR_ENDPOINT_CHANGE: 'secret',
   SCHEDULE_REQUIRED: 'scheduleCron',
   SCHEDULE_INVALID: 'scheduleCron',
 };
@@ -141,7 +151,7 @@ function formFromIntegration(integration: Integration): FormState {
     name: integration.name,
     description: integration.description ?? '',
     server: readString(config.server, ''),
-    port: readNumber(config.port, isAd ? 636 : 443),
+    port: readNumber(config.port, isAd ? ldapDefaultPort(readBool(config.useSsl, true)) : 443),
     username: readString(config.username, ''),
     secret: '',
     baseDn: readString(config.baseDn, ''),
@@ -179,7 +189,11 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
   const [startDiscovery, setStartDiscovery] = useState(true);
   const [created, setCreated] = useState<Integration | null>(null);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  /** Set when the server answered SECRET_REQUIRED_FOR_ENDPOINT_CHANGE. */
+  const [secretDemanded, setSecretDemanded] = useState(false);
   const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, isOpen);
   const fieldId = useId();
   const isActiveDirectory = form.adapterType === 'ActiveDirectory';
   const collectorManaged = form.collectorManaged;
@@ -204,6 +218,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
       setStartDiscovery(true);
       setCreated(null);
       setDiscoveryError(null);
+      setSecretDemanded(false);
     }
   }, [isOpen, integration]);
 
@@ -242,7 +257,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
         ...current,
         adapterType,
         name: keepName ? current.name : defaultName(adapterType, isTr),
-        port: adapterType === 'ActiveDirectory' ? 636 : 443,
+        port: adapterType === 'ActiveDirectory' ? ldapDefaultPort(true) : 443,
         useSsl: true,
         useStartTls: false,
       };
@@ -250,6 +265,19 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     setTestResult(null);
     setError(null);
     setFieldErrors({});
+  };
+
+  /** Switches the LDAP transport; a standard port follows it (636 LDAPS, 389 StartTLS/plaintext). */
+  const setLdapTransport = (useSsl: boolean, useStartTls: boolean) => {
+    setForm((current) => ({
+      ...current,
+      useSsl,
+      useStartTls,
+      port: ldapPortForTransport(current.port, useSsl),
+    }));
+    setTestResult(null);
+    setError(null);
+    setFieldErrors((current) => ({ ...current, port: undefined }));
   };
 
   /** Strips a pasted scheme/path from the server field; returns the cleaned form. */
@@ -288,6 +316,9 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
           errors.secret = isTr ? 'Parola / secret zorunludur.' : 'Password / secret is required.';
         }
       }
+      if (isEdit && needsNewSecret(current) && !current.secret.trim()) {
+        errors.secret = secretForEndpointText;
+      }
       const cronError = validateCron(current.scheduleCron, isTr);
       if (cronError) errors.scheduleCron = cronError;
       if (!Number.isFinite(current.timeoutSeconds) || current.timeoutSeconds < 30 || current.timeoutSeconds > 86_400) {
@@ -296,6 +327,20 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     }
     return errors;
   };
+
+  const prefilled = integration ? formFromIntegration(integration) : null;
+  /**
+   * Editing the server, port, username or TLS settings sends the credential to a
+   * new endpoint, so the server demands the secret again; collector-managed
+   * integrations keep no server-side secret unless one was entered.
+   */
+  const needsNewSecret = (current: FormState): boolean =>
+    prefilled !== null &&
+    (secretDemanded || (!current.collectorManaged && endpointChanged(prefilled, current)));
+  const secretForEndpointText = isTr
+    ? 'Sunucu, port, kullanıcı adı veya TLS ayarı değişti: kayıtlı parola yeni uç noktaya gönderilmez. Parolayı / secret\'ı yeniden girin.'
+    : 'The server, port, username or TLS settings changed, so the stored password is not sent to the new endpoint. Enter the password / secret again.';
+  const secretRequiredNow = isEdit && needsNewSecret(form);
 
   /** Step-level rule that is not tied to a single input. */
   const stepRuleError = (target: number, current: FormState): string | null => {
@@ -342,6 +387,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
     const code = (requestError as Partial<ApiError> | null)?.code;
     const message = integrationErrorMessage(requestError, isTr) || fallback;
     const field = code ? ERROR_CODE_FIELD[code] : undefined;
+    if (code === 'SECRET_REQUIRED_FOR_ENDPOINT_CHANGE') setSecretDemanded(true);
     if (field) {
       setFieldErrors({ [field]: message });
       setStep(FIELD_STEP[field]);
@@ -492,6 +538,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-xs bm-fade-in"
       role="dialog"
       aria-modal="true"
@@ -515,6 +562,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label={isTr ? 'Kapat' : 'Close'}
+            data-dialog-close
             className="p-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 shrink-0"
           >
             <X className="w-5 h-5" />
@@ -660,11 +708,30 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
 
           {step === 2 && (
             <div className="space-y-4">
+              {integration && (
+                <CopyIdField
+                  id={id('integrationId')}
+                  value={integration.id}
+                  isTr={isTr}
+                  label={isTr ? 'Entegrasyon Kimliği' : 'Integration ID'}
+                  hint={
+                    isTr
+                      ? 'Collector yapılandırmasındaki IntegrationId değeri.'
+                      : 'The IntegrationId value of the collector configuration.'
+                  }
+                />
+              )}
               <div>
                 <label htmlFor={id('name')} className={labelClass}>
                   {isTr ? 'Entegrasyon Adı' : 'Integration Name'}
                 </label>
-                <Input id={id('name')} value={form.name} error={fieldErrors.name} onChange={(e) => update('name', e.target.value)} />
+                <Input
+                  id={id('name')}
+                  value={form.name}
+                  error={fieldErrors.name}
+                  onChange={(e) => update('name', e.target.value)}
+                  data-autofocus
+                />
               </div>
 
               <div>
@@ -712,6 +779,18 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                   />
                 </div>
               </div>
+              {isActiveDirectory && ldapPortMismatch(form.port, form.useSsl) && (
+                <p className="-mt-2 text-[11px] text-amber-700 dark:text-amber-300 flex items-start gap-1.5" role="status">
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                  {form.useSsl
+                    ? (isTr
+                      ? 'LDAPS genellikle 636 numaralı portu kullanır; 389 düz LDAP/StartTLS portudur.'
+                      : 'LDAPS normally uses port 636; 389 is the plaintext/StartTLS port.')
+                    : (isTr
+                      ? '636 yalnızca LDAPS (örtük TLS) portudur; StartTLS ve düz LDAP 389 kullanır.'
+                      : 'Port 636 is for LDAPS (implicit TLS) only; StartTLS and plaintext LDAP use 389.')}
+                </p>
+              )}
               {serverHint && (
                 <p className="-mt-2 text-[11px] text-blue-700 dark:text-blue-300 flex items-start gap-1.5" role="status">
                   <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -739,10 +818,9 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                     <input
                       type="checkbox"
                       checked={form.useSsl}
-                      onChange={(e) => {
-                        update('useSsl', e.target.checked);
-                        if (e.target.checked) update('useStartTls', false);
-                      }}
+                      onChange={(e) =>
+                        setLdapTransport(e.target.checked, e.target.checked ? false : form.useStartTls)
+                      }
                     />
                     {isTr ? 'LDAPS (TLS) kullan' : 'Use LDAPS (TLS)'}
                   </label>
@@ -752,10 +830,7 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                     <input
                       type="checkbox"
                       checked={form.useStartTls}
-                      onChange={(e) => {
-                        update('useStartTls', e.target.checked);
-                        if (e.target.checked) update('useSsl', false);
-                      }}
+                      onChange={(e) => setLdapTransport(e.target.checked ? false : form.useSsl, e.target.checked)}
                     />
                     {isTr ? 'StartTLS kullan' : 'Use StartTLS'}
                   </label>
@@ -842,7 +917,9 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
               <div>
                 <label htmlFor={id('secret')} className={labelClass}>
                   {isTr ? 'Parola / Secret' : 'Password / Secret'}
-                  {(collectorManaged || isEdit) && (isTr ? ' — opsiyonel' : ' — optional')}
+                  {secretRequiredNow
+                    ? (isTr ? ' — zorunlu' : ' — required')
+                    : (collectorManaged || isEdit) && (isTr ? ' — opsiyonel' : ' — optional')}
                 </label>
                 <Input
                   id={id('secret')}
@@ -851,10 +928,14 @@ export const IntegrationWizardModal: React.FC<IntegrationWizardModalProps> = ({
                   error={fieldErrors.secret}
                   onChange={(e) => update('secret', e.target.value)}
                   autoComplete="new-password"
-                  placeholder={isEdit ? (isTr ? '••••••• (değiştirilmedi)' : '••••••• (unchanged)') : undefined}
+                  required={secretRequiredNow}
+                  aria-required={secretRequiredNow || undefined}
+                  placeholder={isEdit && !secretRequiredNow ? (isTr ? '••••••• (değiştirilmedi)' : '••••••• (unchanged)') : undefined}
                 />
-                <p className="text-[11px] text-neutral-400 mt-1">
-                  {isEdit
+                <p className={`text-[11px] mt-1 ${secretRequiredNow ? 'text-amber-700 dark:text-amber-300' : 'text-neutral-400'}`}>
+                  {secretRequiredNow
+                    ? secretForEndpointText
+                    : isEdit
                     ? (isTr
                       ? 'Boş bırakırsanız mevcut parola korunur. Yeni bir değer girerseniz şifreli kasadaki parola değiştirilir.'
                       : 'Leave empty to keep the current password. A new value replaces the password in the encrypted vault.')

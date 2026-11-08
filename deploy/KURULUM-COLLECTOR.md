@@ -1,6 +1,6 @@
 # BerMap Collector Kurulumu
 
-Collector, BerMap sunucusunun doğrudan erişemediği ağlarda (şube, DMZ, ayrı bir forest) Active Directory ve vCenter keşfini yerinde yapar ve sonucu **dışarı yönlü HTTPS** ile sunucuya gönderir. Sunucudan collector'a hiçbir bağlantı açılmaz; collector'da gelen bağlantı için port açmanız gerekmez. Sunucuya ulaşılamadığında keşif sonuçları yerel kuyrukta tutulur ve bağlantı gelince sırayla iletilir.
+Collector, BerMap sunucusunun doğrudan erişemediği ağlarda (şube, DMZ, ayrı bir forest) Active Directory ve vCenter keşfini yerinde yapar ve sonucu **dışarı yönlü HTTPS** ile sunucuya gönderir. Sunucudan collector'a hiçbir bağlantı açılmaz; collector'da gelen bağlantı için port açmanız gerekmez. Sunucuya ulaşılamadığında keşif sonuçları yerel kuyrukta tutulur ve bağlantı gelince sırayla iletilir; servis gönderim sırasında durdurulursa kalan parçalar da kuyruğa yazılır ve yeniden başlayınca gönderilir. Bir snapshot'ın parçalarından biri kaybolursa (kuyruk kotası, yeniden deneme sınırı, sunucunun reddi) snapshot hiçbir zaman "tam" sayılmaz: kalan parçaları gönderilmez ve sunucudaki iş `COLLECTOR_BATCH_LOST` / `COLLECTOR_BATCH_REJECTED` hatasıyla kapanır.
 
 Paket self-contained'dir; collector makinesinde .NET kurulumu gerekmez.
 
@@ -19,19 +19,20 @@ Paket self-contained'dir; collector makinesinde .NET kurulumu gerekmez.
 .\Install-BerMapCollector.ps1 -ServerUrl https://bermap.corp.local -Name dc2-collector
 ```
 
-Betik kayıt token'ını sorar (ekranda gösterilmez), dosyaları `C:\Program Files\BerMap\Collector` altına kopyalar, yapılandırmayı `C:\ProgramData\BerMap\Collector\appsettings.Production.json` dosyasına yazar, **BerMapCollector** Windows servisini kaydeder (servisin `BERMAP_CONFIG_FILE` ortam değişkeni bu dosyayı gösterir) ve collector sunucuya kaydolana kadar bekler. Veri dizinine (yapılandırma, collector kimliği, çevrimdışı kuyruk) yalnız SYSTEM ve Administrators erişebilir. Token'ı sormadan vermek için `-EnrollmentToken (Read-Host -AsSecureString)` kullanın.
+Betik kayıt token'ını sorar (ekranda gösterilmez), dosyaları `C:\Program Files\BerMap\Collector` altına kopyalar, yapılandırmayı `C:\ProgramData\BerMap\Collector\appsettings.Production.json` dosyasına yazar, **BerMapCollector** Windows servisini kaydeder (servisin `BERMAP_CONFIG_FILE` ortam değişkeni bu dosyayı gösterir) ve collector sunucuya kaydolana kadar bekler. Veri dizinine (yapılandırma, collector kimliği, çevrimdışı kuyruk) yalnız SYSTEM ve Administrators erişebilir; dizinin ve yapılandırma dosyasının sahibi Administrators yapılır. Kurulumdan önce başka bir kullanıcının oluşturduğu (sahibi SYSTEM ya da Administrators olmayan) bir veri dizini ya da yapılandırma dosyası reddedilir: sahibi izinleri sonradan geri açabilir. İçeriği inceleyip dizini silin ya da `-Force` ile betiğin sahipliği alıp izinleri sıfırlamasını sağlayın. Token'ı sormadan vermek için `-EnrollmentToken (Read-Host -AsSecureString)` kullanın.
 
 | Parametre | Varsayılan | Açıklama |
 |---|---|---|
-| `-ServerUrl` | — | BerMap sunucusunun adresi (`https://sunucu[:port]`) |
+| `-ServerUrl` | — | BerMap sunucusunun adresi (`https://sunucu[:port]`; sunucu bir ters vekilde yol önekiyle yayınlanıyorsa `https://vekil/bermap` gibi önekle) |
 | `-EnrollmentToken` | — | Kayıt token'ı (SecureString); verilmezse ilk kurulumda sorulur |
 | `-Name` | makine adı | Konsolda görünen collector adı |
-| `-InstallDir`, `-DataDir` | `Program Files\BerMap\Collector`, `ProgramData\BerMap\Collector` | Program dizini; yapılandırma ve veri dizini. İkisi de boş olmalı ya da daha önce bu betikle kurulmuş olmalıdır |
+| `-InstallDir`, `-DataDir` | `Program Files\BerMap\Collector`, `ProgramData\BerMap\Collector` | Program dizini; yapılandırma ve veri dizini. Ya henüz var olmamalı (betik oluşturur), ya daha önce bu betikle kurulmuş olmalı, ya da boş varsayılan dizin olmalıdır; başka bir dizin (boş olsa bile, ör. `C:\Tools`) reddedilir. Sunucunun veri dizini (`ProgramData\BerMap`, kasa) collector veri dizini olarak kullanılamaz |
 | `-RegistrationTimeoutSeconds` | `120` | Kaydın beklenme süresi |
+| `-Force` | — | Başka bir kullanıcının oluşturduğu veri dizininin ve yapılandırma dosyasının sahipliğini alır, izinlerini sıfırlar |
 
 **Yükseltme:** yeni paketi açıp betiği parametresiz yeniden çalıştırın. Yapılandırma birleştirilir: eklediğiniz entegrasyonlar ve elle yazdığınız ayarlar korunur, yalnız verdiğiniz değerler değişir. `-ServerUrl`, `-EnrollmentToken` ya da `-Name` değişirse collector yeniden kaydolur (yeni ad konsolda yeni bir kayıt olarak görünür; eskisini **Collectorlar** sayfasından silin).
 
-**Kaldırma:** `.\Uninstall-BerMapCollector.ps1` (yapılandırma ve collector kimliği korunur, yeniden kurulum aynı kimlikle devam eder; veri dizinini de silmek için `-RemoveData`).
+**Kaldırma:** `.\Uninstall-BerMapCollector.ps1` (yapılandırma ve collector kimliği korunur, yeniden kurulum aynı kimlikle devam eder; veri dizinini de silmek için `-RemoveData`). Kaldırma yalnız kurulumun oluşturduğunu siler: betiğin oluşturduğu dizin kaldırılır, kurulumdan önce boş olarak var olan varsayılan dizin boşaltılıp bırakılır. `-RemoveData` yalnız collector veri dizinini (`.bermap-collector-data` işareti, `collector-id` ya da `offline_queue` içeren) siler; sunucunun veri dizinine hiçbir zaman dokunmaz.
 
 ## Linux (systemd)
 
@@ -41,10 +42,10 @@ cd bermap-collector-<sürüm>-linux-x64
 sudo BERMAP_ENROLLMENT_TOKEN='<token>' ./install.sh --server-url https://bermap.corp.local --name dc2-collector
 ```
 
-Program `/opt/bermap/collector`, yapılandırma `/etc/bermap/collector.json` (`root:bermap-collector`, `0640`), veri `/var/lib/bermap/collector` altına kurulur; servis `bermap-collector` adıyla `bermap-collector` kullanıcısıyla çalışır ve yapılandırmayı systemd biriminin `BERMAP_CONFIG_FILE` ortam değişkeninden bulur. Token `BERMAP_ENROLLMENT_TOKEN` ile verilmezse sorulur; `--enrollment-token` da kullanılabilir ama komut satırı diğer kullanıcılarca `ps` ile görülebilir. Betik sonunda token'ın yalnız ilk karakterlerini yazar. Kayıt en çok 120 saniye beklenir (`BERMAP_REGISTER_TIMEOUT` ile değiştirilebilir). `--install-dir` ve `--data-dir` boş bir dizin ya da daha önce bu betikle kurulmuş bir dizin olmalıdır. Günlükler: `journalctl -u bermap-collector`.
+Program `/opt/bermap/collector`, yapılandırma `/etc/bermap/collector.json` (`root:bermap-collector`, `0640`), veri `/var/lib/bermap/collector` altına kurulur; servis `bermap-collector` adıyla `bermap-collector` kullanıcısıyla çalışır ve yapılandırmayı systemd biriminin `BERMAP_CONFIG_FILE` ortam değişkeninden bulur. Token `BERMAP_ENROLLMENT_TOKEN` ile verilmezse sorulur; `--enrollment-token` da kullanılabilir ama komut satırı diğer kullanıcılarca `ps` ile görülebilir. Betik sonunda token'ın yalnız ilk karakterlerini yazar. Kayıt en çok 120 saniye beklenir (`BERMAP_REGISTER_TIMEOUT` ile değiştirilebilir). `--server-url` sunucu bir ters vekilde yol önekiyle yayınlanıyorsa öneki de içerebilir (`https://vekil.corp.local/bermap`); collector tüm istekleri bu önekin altına gönderir. `--install-dir` ve `--data-dir` ya henüz var olmamalı (betik oluşturur), ya daha önce bu betikle kurulmuş olmalı, ya da boş varsayılan dizin olmalıdır; başka bir dizin (boş olsa bile, ör. `/opt` ya da `/srv`) reddedilir. Sunucunun veri dizini (`/var/lib/bermap`, kasa) ya da onu içeren bir dizin `--data-dir` olarak reddedilir. Günlükler: `journalctl -u bermap-collector`.
 
 **Yükseltme:** yeni paketle `sudo ./install.sh` (parametresiz). Windows'taki gibi yapılandırma birleştirilir; `--server-url`, token ya da `--name` değişirse collector yeniden kaydolur.
-**Kaldırma:** `sudo ./uninstall.sh` (yapılandırma ve veri korunur; `--remove-data` ikisini de siler, gizli dosyalarınıza dokunmaz).
+**Kaldırma:** `sudo ./uninstall.sh` (yapılandırma ve veri korunur; `--remove-data` ikisini de siler, gizli dosyalarınıza dokunmaz). Yalnız kurulumun oluşturduğu silinir: betiğin oluşturduğu dizin kaldırılır, kurulumdan önce boş olarak var olan varsayılan dizin boşaltılıp bırakılır; collector işareti (`.bermap-collector-data`, `collector-id`, `offline_queue`) taşımayan ya da sunucuya ait bir veri dizini silinmez.
 
 Collector ile sunucu aynı makinedeyse dizinler birbirinden ayrıdır; sunucu betikleri (`--remove-data` / `-RemoveData` dahil) collector'ın yapılandırmasına ve verisine dokunmaz.
 
@@ -165,6 +166,8 @@ Ardından servisi yeniden başlatın: `sudo systemctl restart bermap-collector` 
 | Entegrasyonun işi `NOT_COLLECTOR_MANAGED` / `INTEGRATION_DISABLED` ile reddediliyor | Sunucuda entegrasyonu düzenleyip "Veri bir collector üzerinden gelir" seçeneğini işaretleyin ya da entegrasyonu etkinleştirin. |
 | `The secret file ... could not be read` | Dosya yok ya da servis hesabı okuyamıyor (Linux'ta `root:bermap-collector 0640` ve dizin `0750`). |
 | Collector **Çevrimdışı** | Servis durmuş ya da sunucuya erişim kesilmiş. Collector çalışmaya devam eder, sonuçları kuyrukta tutar ve bağlantı gelince gönderir. |
+| Keşif işi `COLLECTOR_BATCH_LOST` ile başarısız | Kesinti sırasında kuyruk disk kotası (`QueueMaxDiskMb`, varsayılan 500 MB) dolduğu için ya da parça yeniden deneme sınırını aştığı için bir snapshot parçası kayboldu. Eksik snapshot uygulanmaz (düğümler eskimiş işaretlenmez); bir sonraki keşif tam snapshot gönderir. Uzun kesintiler bekleniyorsa kotayı büyütün. |
+| Keşif işi `COLLECTOR_BATCH_REJECTED` ile başarısız | Sunucu bir parçayı reddetti (hata metninde durum kodu ve neden yazar; ör. `413` gövde sınırı). Parça boyutu `BerMap:Collector:MaxBatchMb` (varsayılan 8 MB), `BatchSize` (düğüm, varsayılan 500) ve `RelationshipBatchSize` (ilişki, varsayılan 5000) ile küçültülebilir. |
 
 ## Güvenlik notları
 

@@ -2,18 +2,22 @@ import { create } from 'zustand';
 import type { User } from '@/types';
 import { TOKEN_STORAGE_KEY, api, getStoredToken, setForbiddenHandler, setUnauthorizedHandler } from '@/lib/api';
 import { queryClient } from '@/lib/queryClient';
+import type { SignOutReason } from '@/components/auth/loginText';
 
 interface AuthState {
   user: User | null;
   token: string | null;
   isAuthenticated: boolean;
+  /** Why the last session ended without the user signing out; shown on /login. */
+  signOutReason: SignOutReason | null;
   login: (user: User, token: string) => void;
   setUser: (user: User) => void;
   /** Replaces the bearer token (e.g. the one issued after a password change). */
   setToken: (token: string) => void;
   /** Re-reads the signed-in user's profile (role, name) from GET /api/auth/me. */
   refreshProfile: () => Promise<void>;
-  logout: () => void;
+  /** Ends the session; `reason` explains a sign-out the user did not ask for. */
+  logout: (reason?: SignOutReason | null) => void;
 }
 
 function writeToken(token: string | null): void {
@@ -38,9 +42,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: initialToken,
   isAuthenticated: false,
+  signOutReason: null,
   login: (user, token) => {
     writeToken(token);
-    set({ user, token, isAuthenticated: true });
+    set({ user, token, isAuthenticated: true, signOutReason: null });
   },
   setUser: (user) => set({ user, isAuthenticated: true }),
   setToken: (token) => {
@@ -66,18 +71,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     return profileRefresh;
   },
-  logout: () => {
+  logout: (reason = null) => {
     writeToken(null);
     queryClient.clear();
-    set({ user: null, token: null, isAuthenticated: false });
+    set({ user: null, token: null, isAuthenticated: false, signOutReason: reason });
   },
 }));
 
 // Any 401 from an authenticated request drops the session; ProtectedRoute then
 // redirects to /login without a full page reload, so no redirect loop can occur.
+// The token expired or was revoked (role change, password reset, deactivation):
+// LoginPage says so instead of showing a bare form.
 setUnauthorizedHandler(() => {
   if (useAuthStore.getState().token !== null || getStoredToken() !== null) {
-    useAuthStore.getState().logout();
+    useAuthStore.getState().logout('session_ended');
   }
 });
 

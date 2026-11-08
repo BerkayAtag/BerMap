@@ -31,8 +31,16 @@ systemctl disable --now "$SERVICE" 2>/dev/null || true
 rm -f "$UNIT_FILE"
 systemctl daemon-reload
 
-if [[ -f "$INSTALL_DIR/$MARKER" || "$INSTALL_DIR" == "$UNIT_INSTALL_DIR" ]]; then
+# A directory install.sh created (marker "created", or an older empty marker) is removed;
+# an empty default directory it found in place (marker "existing") is emptied and kept.
+if [[ -f "$INSTALL_DIR/$MARKER" && "$(head -n 1 "$INSTALL_DIR/$MARKER")" == existing ]]; then
+  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  echo "Emptied $INSTALL_DIR (it existed before the installation)."
+elif [[ -f "$INSTALL_DIR/$MARKER" ]]; then
   rm -rf "$INSTALL_DIR"
+elif [[ -d "$INSTALL_DIR" && "$INSTALL_DIR" == "$UNIT_INSTALL_DIR" ]]; then
+  # The unit ran from here, but the installation never completed: remove the program files only.
+  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 elif [[ -d "$INSTALL_DIR" ]]; then
   echo "Left $INSTALL_DIR in place: it is not a BerMap server directory ($MARKER is missing)." >&2
 fi

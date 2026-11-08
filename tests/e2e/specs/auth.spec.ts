@@ -8,11 +8,11 @@ import { authFile } from '../support/state';
  * globalSetup already used some, so this is the only file that signs in
  * through the form. A 429 waits for the next window instead of failing.
  */
-async function submitLogin(page: Page, password: string): Promise<void> {
+async function submitLogin(page: Page, password: string, labels = { password: 'Parola', submit: 'Giriş Yap' }): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = page.waitForResponse((r) => r.url().endsWith('/api/auth/login'));
-    await page.getByLabel('Parola').fill(password);
-    await page.getByRole('button', { name: 'Giriş Yap' }).click();
+    await page.getByLabel(labels.password).fill(password);
+    await page.getByRole('button', { name: labels.submit }).click();
     if ((await response).status() !== 429) return;
     await page.waitForTimeout(21_000);
   }
@@ -58,6 +58,23 @@ test.describe('Giriş', () => {
     await page.goto('/capacity');
     await expect(page).toHaveURL(/\/login$/);
     expect(await page.evaluate(() => localStorage.getItem('bermap-token'))).toBeNull();
+    // The form explains why it is shown instead of appearing out of nowhere.
+    await expect(page.getByRole('status').filter({ hasText: 'Oturumunuz sona erdi.' })).toBeVisible();
+  });
+
+  test('İngilizce arayüzde hatalı giriş İngilizce gösterilir (sunucunun Türkçe metni değil)', async ({ page, problems }) => {
+    test.setTimeout(150_000);
+    await page.addInitScript(() => localStorage.setItem('bermap-locale', 'en'));
+    await page.goto('/login');
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    await page.getByLabel('Username').fill(ADMIN_USERNAME);
+    await submitLogin(page, 'wrong-password-123456', { password: 'Password', submit: 'Sign In' });
+    const alert = page.getByRole('alert');
+    await expect(alert).toHaveText('Invalid username or password.');
+    await expect(alert).not.toContainText('Kullanıcı');
+    // A plain sign-in page carries no "session ended" note.
+    await expect(page.getByRole('status')).toHaveCount(0);
+    problems.expectNone([/POST \/api\/auth\/login -> (401|429)/, /status of (401|429)/]);
   });
 });
 

@@ -131,6 +131,25 @@ public class ChangeTrackingAndInventoryTests
         Assert.Equal(new[] { "Alpha", "alpha2", "beta", "Charlie" }, page.Items.Select(n => n.Name));
     }
 
+    [Theory]
+    [InlineData(int.MaxValue, 50)]
+    [InlineData(int.MaxValue, 200)]
+    [InlineData(3, 50)]
+    public async Task Inventory_PageBeyondTheEnd_IsEmpty_WithoutOverflowingTheOffset(int page, int pageSize)
+    {
+        await using var context = CreateContext();
+        context.InfrastructureNodes.Add(new InfrastructureNode { Name = "srv01", NodeType = NodeType.Computer, Status = "healthy" });
+        await context.SaveChangesAsync();
+
+        var result = await CreateInventory(context).ListNodesAsync(new InventoryQueryRequest { Page = page, PageSize = pageSize });
+
+        // (page - 1) * pageSize in int wrapped to a negative offset: PostgreSQL
+        // rejected it (500) and LINQ treated it as 0 and returned page 1.
+        Assert.Empty(result.Items);
+        Assert.Equal(1, result.TotalCount);
+        Assert.Equal(page, result.Page);
+    }
+
     [Fact]
     public async Task DismissingAReview_RemovesThePossibleDuplicateEdge()
     {

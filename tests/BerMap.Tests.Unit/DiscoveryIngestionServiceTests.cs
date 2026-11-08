@@ -408,4 +408,228 @@ public class DiscoveryIngestionServiceTests
         Assert.Equal("APP-01", node.Name);
         Assert.Contains("\"CpuUsagePercent\":\"77\"", node.PropertiesJson);
     }
+
+    private static DiscoveryResult HostAndVmBatch(Guid integrationId, string prefix, bool withRelationship = true)
+    {
+        var batch = BuildBatch(integrationId,
+            new DiscoveredNodeContract { ExternalId = prefix + "host-1", NodeType = "Hypervisor", Name = "esx01", FQDN = "esx01.corp.local", SourceSystem = "VMware" },
+            new DiscoveredNodeContract { ExternalId = prefix + "vm-1", NodeType = "VirtualMachine", Name = "app01", FQDN = "app01.corp.local", SourceSystem = "VMware" });
+        if (withRelationship)
+        {
+            batch.Relationships.Add(new DiscoveredRelationshipContract
+            {
+                SourceExternalId = prefix + "vm-1",
+                TargetExternalId = prefix + "host-1",
+                RelationshipType = "HostedOn",
+                Evidence = "runtime.host",
+                SourceSystem = "VMware"
+            });
+        }
+        return batch;
+    }
+
+    [Fact]
+    public async Task Ingest_EdgeOfADeletedIntegration_IsAdoptedAndRefreshedByTheRediscoveringOne()
+    {
+        await using var context = CreateContext();
+        var deleted = await SeedIntegrationAsync(context);
+        var recreated = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(deleted.Id, Guid.NewGuid(), HostAndVmBatch(deleted.Id, "a:"));
+
+        // What IntegrationService.DeleteAsync leaves behind.
+        deleted.DeletedAt = DateTime.UtcNow;
+        var orphan = await context.InfrastructureRelationships.SingleAsync();
+        orphan.IsStale = true;
+        orphan.StaleSince = DateTime.UtcNow;
+        await context.SaveChangesAsync();
+
+        var jobId = Guid.NewGuid();
+        var result = await service.IngestAsync(recreated.Id, jobId, HostAndVmBatch(recreated.Id, "b:"));
+
+        var edge = await context.InfrastructureRelationships.SingleAsync();
+        Assert.Equal(recreated.Id, edge.IntegrationId);
+        Assert.False(edge.IsStale);
+        Assert.Null(edge.StaleSince);
+        Assert.Equal(jobId, edge.LastSeenJobId);
+        Assert.Equal(0, result.RelationshipsCreated);
+        Assert.Equal(1, result.RelationshipsUpdated);
+
+        // From now on it is the new owner's edge: a complete run without it stales it.
+        var omitted = await service.IngestAsync(recreated.Id, Guid.NewGuid(), HostAndVmBatch(recreated.Id, "b:", withRelationship: false));
+        Assert.Equal(1, omitted.RelationshipsMarkedStale);
+        Assert.True((await context.InfrastructureRelationships.SingleAsync()).IsStale);
+    }
+
+    [Fact]
+    public async Task Ingest_StaleEdgeOfALiveIntegration_IsAdopted_ButAFreshOneStaysWithItsOwner()
+    {
+        await using var context = CreateContext();
+        var serverSide = await SeedIntegrationAsync(context);
+        var collector = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(serverSide.Id, Guid.NewGuid(), HostAndVmBatch(serverSide.Id, "s:"));
+
+        // A live owner that still reports the edge keeps it.
+        await service.IngestAsync(collector.Id, Guid.NewGuid(), HostAndVmBatch(collector.Id, "c:"));
+        Assert.Equal(serverSide.Id, (await context.InfrastructureRelationships.SingleAsync()).IntegrationId);
+
+        // Its owner no longer reports it (stale): the integration that does takes it over.
+        await service.IngestAsync(serverSide.Id, Guid.NewGuid(), HostAndVmBatch(serverSide.Id, "s:", withRelationship: false));
+        Assert.True((await context.InfrastructureRelationships.SingleAsync()).IsStale);
+
+        await service.IngestAsync(collector.Id, Guid.NewGuid(), HostAndVmBatch(collector.Id, "c:"));
+        var edge = await context.InfrastructureRelationships.SingleAsync();
+        Assert.Equal(collector.Id, edge.IntegrationId);
+        Assert.False(edge.IsStale);
+    }
+
+    [Fact]
+    public async Task Ingest_FinalBatchRelationshipBetweenEarlierBatchNodes_ReusesTheForeignEdge()
+    {
+        await using var context = CreateContext();
+        var other = await SeedIntegrationAsync(context);
+        var collector = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        await service.IngestAsync(other.Id, Guid.NewGuid(), HostAndVmBatch(other.Id, "o:"));
+
+        // Batch 1 carries the endpoints, the final batch the relationships.
+        var jobId = Guid.NewGuid();
+        await service.IngestAsync(collector.Id, jobId, HostAndVmBatch(collector.Id, "c:", withRelationship: false), isCompleteSnapshot: false);
+
+        var final = BuildBatch(collector.Id,
+            new DiscoveredNodeContract { ExternalId = "c:vm-2", NodeType = "VirtualMachine", Name = "app02", FQDN = "app02.corp.local", SourceSystem = "VMware" });
+        foreach (var vm in new[] { "c:vm-1", "c:vm-2" })
+        {
+            final.Relationships.Add(new DiscoveredRelationshipContract
+            {
+                SourceExternalId = vm,
+                TargetExternalId = "c:host-1",
+                RelationshipType = "HostedOn",
+                SourceSystem = "VMware"
+            });
+        }
+
+        var result = await service.IngestAsync(collector.Id, jobId, final, isCompleteSnapshot: true);
+
+        // The (source, target, type) key is unique: vm-1 -> host-1 is reused, not inserted again.
+        Assert.Equal(1, result.RelationshipsCreated);
+        var edges = await context.InfrastructureRelationships.ToListAsync();
+        Assert.Equal(2, edges.Count);
+        Assert.Equal(edges.Count, edges.Select(e => (e.SourceNodeId, e.TargetNodeId, e.RelationshipType)).Distinct().Count());
+        Assert.Equal(other.Id, edges.Single(e => e.SourceSystem == "VMware" && e.IntegrationId != collector.Id).IntegrationId);
+    }
+
+    [Fact]
+    public async Task Ingest_RelationshipOnlyFinalBatch_ResolvesEndpointsFromEarlierBatches()
+    {
+        await using var context = CreateContext();
+        var integration = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+        var jobId = Guid.NewGuid();
+
+        await service.IngestAsync(integration.Id, jobId, HostAndVmBatch(integration.Id, "x:", withRelationship: false), isCompleteSnapshot: false);
+
+        var relationshipsOnly = BuildBatch(integration.Id);
+        relationshipsOnly.Relationships.Add(new DiscoveredRelationshipContract
+        {
+            SourceExternalId = "x:vm-1",
+            TargetExternalId = "x:host-1",
+            RelationshipType = "HostedOn",
+            SourceSystem = "VMware"
+        });
+
+        var result = await service.IngestAsync(integration.Id, jobId, relationshipsOnly, isCompleteSnapshot: true);
+
+        Assert.Equal(1, result.RelationshipsCreated);
+        Assert.Equal(0, result.NodesMarkedStale);
+        Assert.Equal(0, result.SourceLinksStale);
+        Assert.Equal(2, await context.InfrastructureNodes.CountAsync(n => !n.IsStale));
+    }
+
+    [Fact]
+    public async Task Ingest_NodeFirstReportedByANewSource_IsNotMarkedStaleByItsOlderStaleLinks()
+    {
+        await using var context = CreateContext();
+        var ad = await SeedIntegrationAsync(context);
+        var vcenter = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        DiscoveredNodeContract Computer(string id, string name) => new()
+        {
+            ExternalId = id, NodeType = "Computer", Name = name, FQDN = name.ToLowerInvariant() + ".corp.local",
+            SourceSystem = "ActiveDirectory"
+        };
+
+        await service.IngestAsync(ad.Id, Guid.NewGuid(), BuildBatch(ad.Id, Computer("cn:77", "DB77"), Computer("cn:1", "DC01")));
+        await service.IngestAsync(ad.Id, Guid.NewGuid(), BuildBatch(ad.Id, Computer("cn:1", "DC01")));
+        Assert.True((await context.InfrastructureNodes.SingleAsync(n => n.Name == "DB77")).IsStale);
+
+        var result = await service.IngestAsync(vcenter.Id, Guid.NewGuid(), BuildBatch(vcenter.Id, new DiscoveredNodeContract
+        {
+            ExternalId = "vm:77", NodeType = "VirtualMachine", Name = "db77", FQDN = "db77.corp.local", SourceSystem = "VMware"
+        }));
+
+        Assert.Equal(0, result.NodesMarkedStale);
+        var node = await context.InfrastructureNodes.SingleAsync(n => n.FQDN == "db77.corp.local");
+        Assert.False(node.IsStale);
+        Assert.Null(node.StaleSince);
+    }
+
+    [Fact]
+    public async Task Ingest_TwoSourcesReportingDifferentParents_DoNotFlipFlopTheNode()
+    {
+        await using var context = CreateContext();
+        var ad = await SeedIntegrationAsync(context);
+        var vcenter = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        DiscoveryResult VmBatch() => BuildBatch(vcenter.Id, new DiscoveredNodeContract
+        {
+            ExternalId = "vm:50", NodeType = "VirtualMachine", Name = "web50", FQDN = "web50.corp.local",
+            ParentExternalId = "host:9", ParentName = "esx09", SourceSystem = "VMware"
+        });
+        DiscoveryResult AdBatch() => BuildBatch(ad.Id, new DiscoveredNodeContract
+        {
+            ExternalId = "cn:50", NodeType = "Computer", Name = "WEB50", FQDN = "web50.corp.local",
+            ParentExternalId = "ou:servers", ParentName = "Servers", SourceSystem = "ActiveDirectory"
+        });
+
+        await service.IngestAsync(vcenter.Id, Guid.NewGuid(), VmBatch());
+        await service.IngestAsync(ad.Id, Guid.NewGuid(), AdBatch());
+
+        for (var run = 0; run < 3; run++)
+        {
+            var vm = await service.IngestAsync(vcenter.Id, Guid.NewGuid(), VmBatch());
+            var directory = await service.IngestAsync(ad.Id, Guid.NewGuid(), AdBatch());
+            Assert.Equal(0, vm.NodesUpdated);
+            Assert.Equal(0, directory.NodesUpdated);
+        }
+
+        var node = await context.InfrastructureNodes.SingleAsync();
+        Assert.Contains("\"ParentExternalId\":\"host:9\"", node.PropertiesJson);
+    }
+
+    [Fact]
+    public async Task Ingest_SingleSourceRediscovery_StillMovesTheParent()
+    {
+        await using var context = CreateContext();
+        var vcenter = await SeedIntegrationAsync(context);
+        var service = CreateService(context);
+
+        DiscoveryResult VmOn(string host) => BuildBatch(vcenter.Id, new DiscoveredNodeContract
+        {
+            ExternalId = "vm:51", NodeType = "VirtualMachine", Name = "web51", FQDN = "web51.corp.local",
+            ParentExternalId = host, ParentName = host, SourceSystem = "VMware"
+        });
+
+        await service.IngestAsync(vcenter.Id, Guid.NewGuid(), VmOn("host:1"));
+        var moved = await service.IngestAsync(vcenter.Id, Guid.NewGuid(), VmOn("host:2"));
+
+        Assert.Equal(1, moved.NodesUpdated);
+        Assert.Contains("\"ParentExternalId\":\"host:2\"", (await context.InfrastructureNodes.SingleAsync()).PropertiesJson);
+    }
 }

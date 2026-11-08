@@ -11,15 +11,23 @@
 # only the values given change, integrations and settings added by hand are kept.
 set -euo pipefail
 
-INSTALL_DIR=/opt/bermap/collector
-DATA_DIR=/var/lib/bermap/collector
+DEFAULT_INSTALL_DIR=/opt/bermap/collector
+DEFAULT_DATA_DIR=/var/lib/bermap/collector
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+DATA_DIR="$DEFAULT_DATA_DIR"
 CONFIG_DIR=/etc/bermap
 CONFIG_FILE="$CONFIG_DIR/collector.json"
 SERVICE=bermap-collector
 SERVICE_USER=bermap-collector
 UNIT_FILE="/etc/systemd/system/$SERVICE.service"
 # Written into the install directory; only a directory carrying it is ever cleared.
+# It reads "created" when this script created the directory (uninstall removes it) and
+# "existing" for the empty default directory found in place (uninstall empties it).
 MARKER=.bermap-collector
+# The same for the data directory. The server's data directory has its own marker
+# (.bermap-server-data) and is never taken for the collector's.
+DATA_MARKER=.bermap-collector-data
+SERVER_UNIT_FILE=/etc/systemd/system/bermap-server.service
 # Seconds to wait for the collector to register with the server.
 REGISTER_TIMEOUT="${BERMAP_REGISTER_TIMEOUT:-120}"
 # Empty means "not given": an upgrade keeps the configured value.
@@ -132,7 +140,7 @@ before = (normalize_url(bermap.get(url_key)), (collector.get(token_key) or "").s
 if env.get("SERVER_URL"):
     url = normalize_url(env["SERVER_URL"])
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", url):
-        fail(f"Invalid server URL: {env['SERVER_URL']} (expected https://host[:port])")
+        fail(f"Invalid server URL: {env['SERVER_URL']} (expected https://host[:port][/path])")
     bermap[url_key] = url
 if env.get("TOKEN"):
     token = env["TOKEN"].strip()
@@ -181,20 +189,60 @@ if $overlap; then
   exit 2
 fi
 
-# The install directory is cleared on every upgrade: refuse anything that is not
-# empty and was not created by this script (for example --install-dir /opt). The
-# directory the installed unit runs from counts as created by this script.
-if [[ -d "$INSTALL_DIR" && ! -f "$INSTALL_DIR/$MARKER" && "$INSTALL_DIR" != "$UNIT_INSTALL_DIR" \
-      && -n "$(ls -A "$INSTALL_DIR")" ]]; then
-  echo "$INSTALL_DIR is not empty and is not a BerMap collector directory ($MARKER is missing)." >&2
-  echo "Choose a new or empty directory with --install-dir, for example $INSTALL_DIR/bermap-collector." >&2
+# The install directory is cleared on every upgrade and removed by uninstall.sh: only a
+# directory this script creates, one it installed into before (marker), the one the
+# installed unit runs from, or the empty default directory is used. Anything else (for
+# example --install-dir /opt, even when empty) is refused.
+INSTALL_DIR_STATE=""
+if [[ ! -e "$INSTALL_DIR" ]]; then
+  INSTALL_DIR_STATE=created
+elif [[ -f "$INSTALL_DIR/$MARKER" ]]; then
+  INSTALL_DIR_STATE=installed
+elif [[ "$INSTALL_DIR" == "$UNIT_INSTALL_DIR" ]]; then
+  # Installed into before without completing: a directory this script creates is marked at
+  # once, so this one was found in place.
+  INSTALL_DIR_STATE=existing
+elif [[ "$INSTALL_DIR" == "$DEFAULT_INSTALL_DIR" && -d "$INSTALL_DIR" && -z "$(ls -A "$INSTALL_DIR")" ]]; then
+  INSTALL_DIR_STATE=existing
+else
+  echo "$INSTALL_DIR already exists and is not a BerMap collector directory ($MARKER is missing)." >&2
+  echo "Choose a directory that does not exist yet with --install-dir (it is created), for example $INSTALL_DIR/bermap-collector." >&2
   exit 1
 fi
-# The data directory is handed to the service user: refuse a foreign, non-empty one
-# (one holding a collector id or offline queue is a collector data directory).
-if [[ -d "$DATA_DIR" && -n "$(ls -A "$DATA_DIR")" && ! -e "$DATA_DIR/collector-id" \
-      && ! -e "$DATA_DIR/offline_queue" && "$DATA_DIR" != "$UNIT_DATA_DIR" ]]; then
-  echo "$DATA_DIR is not empty and is not a BerMap collector data directory. Choose a new or empty --data-dir." >&2
+
+# The server's data directory (credential vault) is never used as the collector's: not
+# the directory itself and not one that contains it.
+SERVER_DATA_DIR=""
+if [[ -f "$SERVER_UNIT_FILE" ]]; then
+  SERVER_DATA_DIR="$(sed -n 's/^ReadWritePaths=//p' "$SERVER_UNIT_FILE" | head -n 1)"
+fi
+is_server_data_dir() {
+  [[ -e "$1/vault" || -e "$1/.bermap-server-data" ]] && return 0
+  if [[ -n "$SERVER_DATA_DIR" ]]; then
+    case "${SERVER_DATA_DIR%/}/" in "${1%/}/"*) return 0 ;; esac
+  fi
+  return 1
+}
+if is_server_data_dir "$DATA_DIR"; then
+  echo "$DATA_DIR is (or contains) the BerMap server's data directory. Choose a separate --data-dir, for example $DEFAULT_DATA_DIR." >&2
+  exit 1
+fi
+
+# The data directory is handed to the service user (chown -R) and removed by
+# uninstall.sh --remove-data: the same rule as for the install directory. A directory
+# holding a collector id or an offline queue is a collector data directory.
+DATA_DIR_STATE=""
+if [[ ! -e "$DATA_DIR" ]]; then
+  DATA_DIR_STATE=created
+elif [[ -f "$DATA_DIR/$DATA_MARKER" || -e "$DATA_DIR/collector-id" || -e "$DATA_DIR/offline_queue" ]]; then
+  DATA_DIR_STATE=installed
+elif [[ "$DATA_DIR" == "$UNIT_DATA_DIR" ]]; then
+  DATA_DIR_STATE=existing
+elif [[ "$DATA_DIR" == "$DEFAULT_DATA_DIR" && -d "$DATA_DIR" && -z "$(ls -A "$DATA_DIR")" ]]; then
+  DATA_DIR_STATE=existing
+else
+  echo "$DATA_DIR already exists and is not a BerMap collector data directory ($DATA_MARKER is missing)." >&2
+  echo "Choose a directory that does not exist yet with --data-dir (it is created)." >&2
   exit 1
 fi
 
@@ -213,13 +261,16 @@ fi
 
 echo "==> Copying collector files to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-touch "$INSTALL_DIR/$MARKER"
+# A directory this script created is marked at once: it is BerMap's whatever happens next.
+# The empty default directory found in place is marked only after a successful install.
+[[ "$INSTALL_DIR_STATE" != created ]] || echo created > "$INSTALL_DIR/$MARKER"
 find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name "$MARKER" -exec rm -rf {} +
 cp -a "$PACKAGE_DIR/collector/." "$INSTALL_DIR/"
 chown -R root:root "$INSTALL_DIR"
 
 # Collector id and offline queue (discovered inventory awaiting delivery): service user only.
 mkdir -p "$DATA_DIR"
+[[ "$DATA_DIR_STATE" != created ]] || echo created > "$DATA_DIR/$DATA_MARKER"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 ID_FILE="$DATA_DIR/collector-id"
@@ -237,7 +288,17 @@ systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 systemctl start "$SERVICE"
 
+# Marks the empty default directories found in place, now that the install succeeded.
+mark_installed() {
+  [[ "$INSTALL_DIR_STATE" != existing ]] || echo existing > "$INSTALL_DIR/$MARKER"
+  if [[ "$DATA_DIR_STATE" == existing ]]; then
+    echo existing > "$DATA_DIR/$DATA_MARKER"
+    chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/$DATA_MARKER"
+  fi
+}
+
 report() {
+  mark_installed
   echo
   echo "BerMap collector is running and registered with $SERVER_URL"
   echo "Configuration: $CONFIG_FILE"

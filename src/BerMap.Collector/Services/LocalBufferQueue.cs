@@ -23,6 +23,20 @@ public interface IOfflineQueue
     Task<bool> EnqueueAsync<T>(string queueName, T payload, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Persists a payload with a <paramref name="tag"/> (letters, digits and '-', at most 128
+    /// characters) that becomes part of the item id. <see cref="ItemsDiscarded"/> reports the tag
+    /// of an item lost without being dequeued, so the owner knows what was lost without reading it.
+    /// </summary>
+    Task<bool> EnqueueAsync<T>(string queueName, T payload, string tag, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Raised when pending items are discarded without being dequeued: evicted by the disk quota or
+    /// dead-lettered because they could not be read. Raised while the queue is locked: handlers must
+    /// not call back into the queue.
+    /// </summary>
+    event EventHandler<DiscardedQueueItem>? ItemsDiscarded;
+
+    /// <summary>
     /// Leases the oldest item. Unreadable items are moved to dead-letter and skipped.
     /// Returns null when no item is available.
     /// </summary>
@@ -49,6 +63,9 @@ public interface IOfflineQueue
     long GetStorageSizeBytes();
 }
 
+/// <summary>A pending item the queue discarded; <see cref="Tag"/> is the tag given at enqueue time.</summary>
+public sealed record DiscardedQueueItem(string QueueName, string ItemId, string? Tag, string Reason);
+
 public class QueueItem<T>
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -61,7 +78,8 @@ public class QueueItem<T>
 
 /// <summary>
 /// File-backed <see cref="IOfflineQueue"/>. Layout per queue:
-///   {root}/{queue}/{id}.json        pending item (id sorts by enqueue time)
+///   {root}/{queue}/{id}.json        pending item (id sorts by enqueue time; "{ticks}_{guid}" or
+///                                   "{ticks}_{guid}~{tag}")
 ///   {root}/{queue}/{id}.inflight    leased item awaiting Ack/Release
 ///   {root}/{queue}/dead-letter/     unreadable or abandoned items (kept for inspection)
 /// Writes go to a .tmp file first and are moved into place, so a crash never leaves a
@@ -73,6 +91,8 @@ public class LocalBufferQueue : IOfflineQueue
     private const string PendingExtension = ".json";
     private const string InflightExtension = ".inflight";
     private const string TempExtension = ".tmp";
+    private const char TagSeparator = '~';
+    private const int MaxTagLength = 128;
 
     private readonly string _storageDirectory;
     private readonly long _maxDiskBytes;
@@ -95,11 +115,31 @@ public class LocalBufferQueue : IOfflineQueue
         RecoverAfterRestart();
     }
 
-    public async Task<bool> EnqueueAsync<T>(string queueName, T payload, CancellationToken cancellationToken = default)
+    public event EventHandler<DiscardedQueueItem>? ItemsDiscarded;
+
+    public Task<bool> EnqueueAsync<T>(string queueName, T payload, CancellationToken cancellationToken = default)
+        => EnqueueCoreAsync(queueName, payload, null, cancellationToken);
+
+    public Task<bool> EnqueueAsync<T>(string queueName, T payload, string tag, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(tag) || tag.Length > MaxTagLength ||
+            !tag.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+            throw new ArgumentException($"Invalid queue item tag '{tag}'.", nameof(tag));
+        return EnqueueCoreAsync(queueName, payload, tag, cancellationToken);
+    }
+
+    /// <summary>The tag part of an item id, or null for an untagged item.</summary>
+    public static string? TagOf(string itemId)
+    {
+        var separator = itemId.IndexOf(TagSeparator);
+        return separator < 0 ? null : itemId[(separator + 1)..];
+    }
+
+    private async Task<bool> EnqueueCoreAsync<T>(string queueName, T payload, string? tag, CancellationToken cancellationToken)
     {
         var item = new QueueItem<T>
         {
-            Id = NewItemId(),
+            Id = NewItemId(tag),
             QueueName = queueName,
             EnqueuedAt = DateTime.UtcNow,
             Payload = payload
@@ -148,6 +188,7 @@ public class LocalBufferQueue : IOfflineQueue
                 catch (JsonException ex)
                 {
                     MoveToDeadLetter(queueDir, file, $"unreadable: {ex.Message}");
+                    RaiseDiscarded(queueName, file, "unreadable");
                     continue;
                 }
                 catch (FileNotFoundException)
@@ -158,6 +199,7 @@ public class LocalBufferQueue : IOfflineQueue
                 if (item == null || item.Payload == null)
                 {
                     MoveToDeadLetter(queueDir, file, "empty payload");
+                    RaiseDiscarded(queueName, file, "empty payload");
                     continue;
                 }
 
@@ -306,8 +348,28 @@ public class LocalBufferQueue : IOfflineQueue
             .ToList();
 
     /// <summary>Fixed-width UTC ticks keep ordinal file-name order equal to enqueue order.</summary>
-    private static string NewItemId()
-        => $"{DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture)}_{Guid.NewGuid():N}";
+    private static string NewItemId(string? tag)
+    {
+        var id = $"{DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture)}_{Guid.NewGuid():N}";
+        return tag == null ? id : id + TagSeparator + tag;
+    }
+
+    /// <summary>Tells the owner of a pending item that it is gone; a handler failure never breaks the queue.</summary>
+    private void RaiseDiscarded(string queueName, string file, string reason)
+    {
+        var handler = ItemsDiscarded;
+        if (handler == null)
+            return;
+        var itemId = Path.GetFileNameWithoutExtension(file);
+        try
+        {
+            handler(this, new DiscardedQueueItem(queueName, itemId, TagOf(itemId), reason));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Offline queue discard handler failed for item {ItemId}.", itemId);
+        }
+    }
 
     private static async Task WriteAtomicAsync(string path, byte[] content, CancellationToken cancellationToken)
     {
@@ -370,11 +432,13 @@ public class LocalBufferQueue : IOfflineQueue
             .SelectMany(Directory.EnumerateFiles)
             .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal);
         var pending = queueDirs
-            .SelectMany(d => Directory.EnumerateFiles(d).Where(f => f.EndsWith(PendingExtension, StringComparison.Ordinal)))
-            .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal);
+            .SelectMany(d => Directory.EnumerateFiles(d)
+                .Where(f => f.EndsWith(PendingExtension, StringComparison.Ordinal))
+                .Select(f => (File: f, Queue: (string?)Path.GetFileName(d))))
+            .OrderBy(p => Path.GetFileName(p.File), StringComparer.Ordinal);
 
         var evicted = 0;
-        foreach (var file in deadLetters.Concat(pending).ToList())
+        foreach (var (file, queue) in deadLetters.Select(f => (File: f, Queue: (string?)null)).Concat(pending).ToList())
         {
             if (used + incomingBytes <= _maxDiskBytes)
                 break;
@@ -383,6 +447,9 @@ public class LocalBufferQueue : IOfflineQueue
             {
                 used -= length;
                 evicted++;
+                // A dead-lettered item was already given up on; a pending one is lost now.
+                if (queue != null)
+                    RaiseDiscarded(queue, file, "evicted by the disk quota");
             }
         }
 

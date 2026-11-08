@@ -191,6 +191,74 @@ public sealed class IntegrationManagementTests : IDisposable
         Assert.True(details.RootElement.GetProperty("secretRotated").GetBoolean());
     }
 
+    [Theory]
+    [InlineData("server", "attacker.example.test")]
+    [InlineData("port", "18452")]
+    [InlineData("username", "other@corp.local")]
+    [InlineData("allowUntrustedCertificate", "true")]
+    public async Task Update_EndpointChangeWithStoredSecret_RequiresTheSecretAgain(string key, string value)
+    {
+        var service = CreateService();
+        var created = await service.CreateAsync(ValidRequest(), "admin");
+
+        var configuration = new Dictionary<string, object>
+        {
+            ["server"] = "dc01.corp.local",
+            ["port"] = 636,
+            ["username"] = "svc@corp.local"
+        };
+        configuration[key] = key switch
+        {
+            "port" => int.Parse(value),
+            "allowUntrustedCertificate" => bool.Parse(value),
+            _ => value
+        };
+
+        var error = await Assert.ThrowsAsync<IntegrationValidationException>(() => service.UpdateAsync(created.Id,
+            new UpdateIntegrationRequest { Configuration = Config(configuration) }, "admin"));
+        Assert.Equal("SECRET_REQUIRED_FOR_ENDPOINT_CHANGE", error.Code);
+
+        // Nothing was stored: the integration still points at the old endpoint.
+        _context.ChangeTracker.Clear();
+        var stored = await _context.Integrations.AsNoTracking().SingleAsync(i => i.Id == created.Id);
+        Assert.Contains("dc01.corp.local", stored.ConfigurationJson);
+        Assert.Equal(1, stored.ConfigurationVersion);
+
+        // Entering the credential again, or clearing it, makes the change valid.
+        var rotated = await service.UpdateAsync(created.Id,
+            new UpdateIntegrationRequest { Configuration = Config(configuration), Secret = "re-entered-secret" }, "admin");
+        Assert.NotNull(rotated);
+    }
+
+    [Fact]
+    public async Task Update_NonEndpointChangesAndClearedSecret_DoNotNeedTheSecret()
+    {
+        var service = CreateService();
+        var created = await service.CreateAsync(ValidRequest(), "admin");
+
+        // Same endpoint, other settings: the stored secret stays usable.
+        Assert.NotNull(await service.UpdateAsync(created.Id, new UpdateIntegrationRequest
+        {
+            Name = "Renamed AD",
+            Configuration = Config(new { server = "dc01.corp.local", port = 636, username = "svc@corp.local", baseDn = "DC=corp,DC=local" })
+        }, "admin"));
+
+        // Clearing the stored secret removes what could be sent elsewhere.
+        var cleared = await service.UpdateAsync(created.Id, new UpdateIntegrationRequest
+        {
+            Configuration = Config(new { server = "dc02.corp.local", port = 636, username = "svc@corp.local", baseDn = "DC=corp,DC=local" }),
+            ClearSecret = true
+        }, "admin");
+        Assert.NotNull(cleared);
+        Assert.Equal(string.Empty, (await _context.Integrations.SingleAsync(i => i.Id == created.Id)).CredentialReference);
+
+        // Without a stored secret there is nothing to protect.
+        Assert.NotNull(await service.UpdateAsync(created.Id, new UpdateIntegrationRequest
+        {
+            Configuration = Config(new { server = "dc03.corp.local", port = 636, username = "svc@corp.local", baseDn = "DC=corp,DC=local" })
+        }, "admin"));
+    }
+
     [Fact]
     public async Task Delete_StalesItsDataAndClosesOpenJobs()
     {

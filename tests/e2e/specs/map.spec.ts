@@ -1,16 +1,22 @@
 import { test, expect } from '../support/fixtures';
-import { nodeByName, topology } from '../support/graph';
+import { nodeByName, type Topology } from '../support/graph';
 
 test.describe('Altyapı Haritası', () => {
   test('filtre sayacı eşleşen düğüm sayısını gösterir ve temizlenir', async ({ page, problems }) => {
-    const graph = await topology();
+    // Other specs add nodes in parallel (collector batches), so a count read from
+    // the API before or after the page loads can differ from what the page shows.
+    // The expected numbers come from the very topology response the page renders.
+    const loaded = page.waitForResponse(
+      (r) => new URL(r.url()).pathname === '/api/graph/topology' && r.request().method() === 'GET' && r.ok(),
+    );
+    await page.goto('/map');
+    const graph = (await (await loaded).json()) as Topology;
     const total = graph.nodes.length;
     const sqlMatches = graph.nodes.filter(
       (n) => n.name.toLowerCase().includes('sql') || n.fqdn.toLowerCase().includes('sql') || n.nodeType.toLowerCase().includes('sql'),
     ).length;
     expect(sqlMatches).toBeGreaterThanOrEqual(3);
 
-    await page.goto('/map');
     const counter = page.getByText('Gösterilen:');
     await expect(counter).toContainText(`${total} düğüm`);
     await expect(page.locator('.react-flow__node')).toHaveCount(total);

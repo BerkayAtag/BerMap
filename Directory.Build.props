@@ -1,7 +1,7 @@
 <Project>
   <!-- Single source of the product version: release packages, /health and assembly metadata. -->
   <PropertyGroup>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Authors>Berkay Atağ</Authors>
     <Company>Berkay Atağ</Company>
     <Product>BerMap</Product>

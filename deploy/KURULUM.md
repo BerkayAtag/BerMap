@@ -19,14 +19,15 @@ Paketi açın, **yönetici PowerShell** penceresinde paket klasörüne geçin:
 .\Install-BerMapServer.ps1 -DbHost localhost -DbUser bermap
 ```
 
-Betik veritabanı parolasını sorar, dosyaları `C:\Program Files\BerMap\Server` altına kopyalar, yapılandırmayı program dizininin dışına, `C:\ProgramData\BerMap\appsettings.Production.json` dosyasına yazar (yalnız SYSTEM ve Administrators okuyabilir), **BerMapServer** Windows servisini kaydeder (servisin `BERMAP_CONFIG_FILE` ortam değişkeni bu dosyayı gösterir), güvenlik duvarında portu açar ve sunucu hazır olana kadar bekler.
+Betik veritabanı parolasını sorar, dosyaları `C:\Program Files\BerMap\Server` altına kopyalar, yapılandırmayı program dizininin dışına, `C:\ProgramData\BerMap\appsettings.Production.json` dosyasına yazar (`ProgramData\BerMap` dizinine yalnız SYSTEM ve Administrators erişebilir, sahibi Administrators yapılır; kurulumdan önce başka bir kullanıcının oluşturduğu bir dizin, yapılandırma dosyası ya da kasa reddedilir, `-Force` ile sahiplik alınıp izinler sıfırlanır), **BerMapServer** Windows servisini kaydeder (servisin `BERMAP_CONFIG_FILE` ortam değişkeni bu dosyayı gösterir), güvenlik duvarında portu açar ve sunucu hazır olana kadar bekler.
 
 | Parametre | Varsayılan | Açıklama |
 |---|---|---|
 | `-Port` | `8080` | Dinlenecek port |
 | `-CertificatePath`, `-CertificatePassword` | — | `.pfx` verilirse konsol HTTPS ile sunulur |
 | `-DbHost`, `-DbPort`, `-DbName`, `-DbUser`, `-DbPassword` | `5432`, `bermap` | PostgreSQL bağlantısı |
-| `-InstallDir`, `-DataDir` | `Program Files\BerMap\Server`, `ProgramData\BerMap` | Program dizini; yapılandırma ve kasa dizini. Program dizini boş olmalı ya da daha önce bu betikle kurulmuş olmalıdır |
+| `-InstallDir`, `-DataDir` | `Program Files\BerMap\Server`, `ProgramData\BerMap` | Program dizini; yapılandırma ve kasa dizini. Program dizini ya henüz var olmamalı (betik oluşturur), ya daha önce bu betikle kurulmuş olmalı, ya da boş varsayılan dizin olmalıdır; başka bir dizin (boş olsa bile) reddedilir |
+| `-Force` | — | Başka bir kullanıcının oluşturduğu veri dizininin, yapılandırma dosyasının ya da kasanın sahipliğini alır, izinlerini sıfırlar |
 
 **Yükseltme:** yeni paketi açıp betiği parametresiz yeniden çalıştırın. Yapılandırma, kasa ve veritabanı korunur; elle eklediğiniz ayarlar (ör. `BerMap:ReverseProxy`) silinmez. Yalnız verdiğiniz değerler değişir: `-Db*` parametreleri bağlantı dizesindeki ilgili alanı (`-DbPassword` tek başına parolayı yeniler), `-Port` yalnız portu, `-CertificatePath` (ve `-CertificatePassword`) yalnız sertifikayı. Örneğin sertifika yenilemek için:
 
@@ -44,10 +45,10 @@ cd bermap-server-<sürüm>-linux-x64
 sudo ./install.sh --db-host localhost --db-user bermap
 ```
 
-Program `/opt/bermap/server`, yapılandırma `/etc/bermap/appsettings.Production.json`, kasa `/var/lib/bermap/vault` altına kurulur; servis `bermap-server` adıyla `bermap` kullanıcısıyla çalışır ve yapılandırmayı systemd biriminin `BERMAP_CONFIG_FILE` ortam değişkeninden bulur. Parolayı sormadan vermek için `BERMAP_DB_PASSWORD` ortam değişkenini kullanın. `--install-dir` boş bir dizin ya da daha önce bu betikle kurulmuş bir dizin olmalıdır; betik başka içerik barındıran bir dizini (ör. `/opt`) silmez, kurulumu reddeder. Günlükler: `journalctl -u bermap-server`.
+Program `/opt/bermap/server`, yapılandırma `/etc/bermap/appsettings.Production.json`, kasa `/var/lib/bermap/vault` altına kurulur; servis `bermap-server` adıyla `bermap` kullanıcısıyla çalışır ve yapılandırmayı systemd biriminin `BERMAP_CONFIG_FILE` ortam değişkeninden bulur. Parolayı sormadan vermek için `BERMAP_DB_PASSWORD` ortam değişkenini kullanın. `--install-dir` ya henüz var olmamalı (betik oluşturur), ya daha önce bu betikle kurulmuş olmalı, ya da boş varsayılan dizin olmalıdır; başka bir dizini (boş olsa bile, ör. `/opt`) betik kullanmaz, kurulumu reddeder. Hazır olma en çok 180 saniye beklenir (`BERMAP_READY_TIMEOUT` ile değiştirilebilir). Günlükler: `journalctl -u bermap-server`.
 
 **Yükseltme:** yeni paketle `sudo ./install.sh` (parametresiz). Yapılandırma birleştirilir; elle eklenen ayarlar korunur, yalnız verilen değerler değişir: `--db-host`, `--db-port`, `--db-name`, `--db-user` bağlantı dizesindeki ilgili alanı, `--port` dinlenen portu değiştirir. Veritabanı parolasını yenilemek için `sudo BERMAP_DB_PASSWORD=... ./install.sh` yeterlidir.
-**Kaldırma:** `sudo ./uninstall.sh` (yapılandırma, kasa ve veritabanı korunur; `--remove-data` kasayı ve yapılandırmayı da siler).
+**Kaldırma:** `sudo ./uninstall.sh` (yapılandırma, kasa ve veritabanı korunur; `--remove-data` kasayı ve yapılandırmayı da siler). Yalnız kurulumun oluşturduğu silinir: betiğin oluşturduğu program dizini kaldırılır, kurulumdan önce boş olarak var olan varsayılan dizin boşaltılıp bırakılır. Windows'taki `Uninstall-BerMapServer.ps1` de aynı kuralı uygular.
 
 ## Collector
 

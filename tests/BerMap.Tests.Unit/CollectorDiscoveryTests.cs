@@ -326,8 +326,13 @@ public class CollectorDiscoveryTests : IDisposable
         Assert.Contains($"jobId={jobId}", handler.Requests[1].Query);
         Assert.Contains($"jobId={jobId}", handler.Requests[2].Query);
         Assert.Contains("final=true", handler.Requests[2].Query);
-        // The snapshot is closed, so nothing is left in the persisted open-snapshot list.
-        Assert.Equal("{}", File.ReadAllText(Path.Combine(_dir, "snapshot-jobs.json")));
+        // The snapshot is closed: the persisted list only remembers it as delivered (so a batch
+        // sent twice after a crash is recognised), not as open or lost.
+        using var saved = JsonDocument.Parse(File.ReadAllText(Path.Combine(_dir, "snapshot-jobs.json")));
+        var entry = Assert.Single(saved.RootElement.EnumerateObject()).Value;
+        Assert.True(entry.GetProperty("Closed").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, entry.GetProperty("Lost").ValueKind);
+        Assert.Equal(3, entry.GetProperty("NextSequence").GetInt32());
     }
 
     [Fact]
@@ -344,9 +349,15 @@ public class CollectorDiscoveryTests : IDisposable
             new HttpClient(handler) { BaseAddress = new Uri("http://bermap.test") }, queue,
             NullLogger<CollectorClient>.Instance, options);
 
-        var orphan = await NewClient().SubmitSnapshotBatchAsync(Result(1, 0), Guid.NewGuid(), 1, final: true);
+        // A later batch whose first batch never reached the server is not sent; the snapshot is
+        // reported as failed on a job of its own instead (final, Success=false, no nodes).
+        var orphanBatch = Result(1, 0);
+        orphanBatch.IntegrationId = IntegrationA;
+        var orphan = await NewClient().SubmitSnapshotBatchAsync(orphanBatch, Guid.NewGuid(), 1, final: true);
         Assert.Equal(BatchDelivery.Rejected, orphan);
-        Assert.Empty(handler.Requests);
+        var report = Assert.Single(handler.Requests);
+        Assert.Equal("?final=true", report.Query);
+        handler.Requests.Clear();
 
         var snapshot = Guid.NewGuid();
         Assert.Equal(BatchDelivery.Delivered, await NewClient().SubmitSnapshotBatchAsync(Result(1, 0), snapshot, 0, final: false));

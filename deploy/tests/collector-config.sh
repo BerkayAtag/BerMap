@@ -53,6 +53,10 @@ expect_failure "first install needs a server URL" "pass --server-url" TOKEN="$TO
 expect_failure "first install needs a token" "EnrollmentToken is not configured" SERVER_URL=https://bermap.corp.local
 expect_failure "server URL must be http(s)" "Invalid server URL" SERVER_URL=bermap.corp.local TOKEN="$TOKEN_VALUE"
 expect_failure "token without whitespace" "whitespace" SERVER_URL=https://bermap.corp.local TOKEN="abc def"
+expect_failure "server URL without a query" "Invalid server URL" SERVER_URL="https://bermap.corp.local/?x=1" TOKEN="$TOKEN_VALUE"
+merge SERVER_URL=https://proxy.corp.local/bermap/ TOKEN="$TOKEN_VALUE"
+check "a server URL path prefix is kept (trailing slash dropped)" 'bermap["ServerUrl"] == "https://proxy.corp.local/bermap" and meta[0] == "https://proxy.corp.local/bermap"'
+rm -f "$CONFIG"
 merge SERVER_URL=https://bermap.corp.local/ TOKEN="$TOKEN_VALUE" NAME=dc2-collector
 check "first install writes the given values" \
   'bermap["ServerUrl"] == "https://bermap.corp.local" and collector["EnrollmentToken"] == "'"$TOKEN_VALUE"'" and collector["Name"] == "dc2-collector" and collector["DataDirectory"] == "/var/lib/bermap/collector" and collector["Integrations"] == []'

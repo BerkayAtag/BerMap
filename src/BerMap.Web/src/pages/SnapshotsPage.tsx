@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
@@ -26,6 +26,7 @@ import { api } from '@/lib/api';
 import { useLocale } from '@/lib/i18n';
 import { useT } from '@/lib/i18n-runtime';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { useCanOperate } from '@/stores/authStore';
 import {
   formatDateTime,
@@ -255,6 +256,15 @@ export const SnapshotsPage: React.FC = () => {
 
   const t = useT();
   const canOperate = useCanOperate();
+
+  const createDialogRef = useRef<HTMLDivElement>(null);
+  const diffDialogRef = useRef<HTMLDivElement>(null);
+  const detailDialogRef = useRef<HTMLDivElement>(null);
+  const verificationDialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(createDialogRef, isCreateOpen);
+  useDialogFocus(diffDialogRef, isDiffOpen);
+  useDialogFocus(detailDialogRef, Boolean(detailSnapshotId), { initialFocus: 'container' });
+  useDialogFocus(verificationDialogRef, verification !== null);
 
   // Escape closes the top-most open dialog.
   const anyDialogOpen = isCreateOpen || isDiffOpen || Boolean(detailSnapshotId) || verification !== null;
@@ -645,6 +655,7 @@ export const SnapshotsPage: React.FC = () => {
 
       {isCreateOpen && (
         <div
+          ref={createDialogRef}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           role="dialog"
           aria-modal="true"
@@ -663,6 +674,7 @@ export const SnapshotsPage: React.FC = () => {
                 type="button"
                 onClick={() => setIsCreateOpen(false)}
                 className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                data-dialog-close
                 aria-label={isTr ? 'Pencereyi kapat' : 'Close window'}
               >
                 <X className="w-5 h-5" />
@@ -723,6 +735,7 @@ export const SnapshotsPage: React.FC = () => {
 
       {isDiffOpen && (
         <div
+          ref={diffDialogRef}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           role="dialog"
           aria-modal="true"
@@ -745,6 +758,7 @@ export const SnapshotsPage: React.FC = () => {
                 type="button"
                 onClick={() => setIsDiffOpen(false)}
                 className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                data-dialog-close
                 aria-label={isTr ? 'Karşılaştırmayı kapat' : 'Close comparison'}
               >
                 <X className="w-5 h-5" />
@@ -899,7 +913,8 @@ export const SnapshotsPage: React.FC = () => {
 
       {detailSnapshotId && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+          ref={detailDialogRef}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs outline-none"
           role="dialog"
           aria-modal="true"
           aria-label={isTr ? 'Snapshot detayı' : 'Snapshot detail'}
@@ -926,6 +941,7 @@ export const SnapshotsPage: React.FC = () => {
                 type="button"
                 onClick={() => setDetailSnapshotId(null)}
                 className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                data-dialog-close
                 aria-label={isTr ? 'Detayı kapat' : 'Close detail'}
               >
                 <X className="w-5 h-5" />
@@ -1110,6 +1126,7 @@ export const SnapshotsPage: React.FC = () => {
 
       {verification && (
         <div
+          ref={verificationDialogRef}
           className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           role="dialog"
           aria-modal="true"
@@ -1138,6 +1155,7 @@ export const SnapshotsPage: React.FC = () => {
                 type="button"
                 onClick={() => setVerification(null)}
                 className="p-1 rounded text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                data-dialog-close
                 aria-label={isTr ? 'Doğrulama sonucunu kapat' : 'Close verification result'}
               >
                 <X className="w-5 h-5" />

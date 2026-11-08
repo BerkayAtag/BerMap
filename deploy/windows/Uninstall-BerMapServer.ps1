@@ -21,6 +21,13 @@ $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 $marker = '.bermap-server'
 $configVariable = 'BERMAP_CONFIG_FILE'
 
+function Test-CollectorDataDir([string] $Path) {
+    # A collector data directory kept below the server's ($DataDir\Collector by default);
+    # Uninstall-BerMapCollector.ps1 removes it.
+    return (Test-Path (Join-Path $Path '.bermap-collector-data')) -or (Test-Path (Join-Path $Path 'collector-id')) -or
+        (Test-Path (Join-Path $Path 'offline_queue'))
+}
+
 # The service records the directories the installer used (-InstallDir, -DataDir).
 $serviceInstallDir = $null
 $configPath = $null
@@ -45,9 +52,18 @@ $rules = @(Get-NetFirewallRule -DisplayName 'BerMap Server (*)' -ErrorAction Sil
 if ($rules.Count -gt 0) { $rules | Remove-NetFirewallRule }
 
 # Only a directory the installer created (marker) or the service ran from is removed.
+# A directory the installer created (marker "created", or an older empty marker) is removed;
+# an empty default directory it found in place (marker "existing") is emptied and kept.
 if (Test-Path $InstallDir) {
-    if ((Test-Path (Join-Path $InstallDir $marker)) -or ($serviceInstallDir -and $serviceInstallDir -eq $InstallDir)) {
+    $markerPath = Join-Path $InstallDir $marker
+    if ((Test-Path $markerPath) -and ((Get-Content -Path $markerPath -TotalCount 1) -eq 'existing')) {
+        Get-ChildItem -Path $InstallDir -Force | Remove-Item -Recurse -Force
+        Write-Host "Emptied $InstallDir (it existed before the installation)."
+    } elseif (Test-Path $markerPath) {
         Remove-Item -Path $InstallDir -Recurse -Force
+    } elseif ($serviceInstallDir -and $serviceInstallDir -eq $InstallDir) {
+        # The service ran from here, but the installation never completed: the program files only.
+        Get-ChildItem -Path $InstallDir -Force | Remove-Item -Recurse -Force
     } else {
         Write-Warning "Left $InstallDir in place: it is not a BerMap server directory ($marker is missing)."
     }
@@ -57,9 +73,10 @@ if ($RemoveData) {
     if (Test-Path $DataDir) {
         # A collector on the same machine keeps its data in $DataDir\Collector by default;
         # Uninstall-BerMapCollector.ps1 removes it.
-        Get-ChildItem -Path $DataDir -Force | Where-Object { $_.Name -ne 'Collector' } | Remove-Item -Recurse -Force
-        if (Get-ChildItem -Path $DataDir -Force | Select-Object -First 1) {
-            Write-Host "Kept the BerMap collector data in $(Join-Path $DataDir 'Collector')."
+        $collectorDirs = @(Get-ChildItem -Path $DataDir -Directory -Force | Where-Object { $_.Name -eq 'Collector' -or (Test-CollectorDataDir $_.FullName) })
+        Get-ChildItem -Path $DataDir -Force | Where-Object { $_.FullName -notin $collectorDirs.FullName } | Remove-Item -Recurse -Force
+        if ($collectorDirs.Count -gt 0) {
+            Write-Host "Kept the BerMap collector data in $($collectorDirs.FullName -join ', ')."
         } else {
             Remove-Item -Path $DataDir -Force
         }

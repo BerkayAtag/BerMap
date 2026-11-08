@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BerMap.Contracts;
@@ -12,7 +13,10 @@ namespace BerMap.Collector.Services;
 /// <summary>How a collector discovery run ended, as far as the collector can tell.</summary>
 public enum DiscoveryRunStatus
 {
-    /// <summary>The adapter succeeded and every batch was delivered or buffered.</summary>
+    /// <summary>
+    /// The adapter succeeded and every batch was delivered or buffered (also when the service
+    /// started stopping during the upload: the rest is sent from the offline queue).
+    /// </summary>
     Completed,
 
     /// <summary>The adapter returned partial data (Success=false); it was sent.</summary>
@@ -21,10 +25,13 @@ public enum DiscoveryRunStatus
     /// <summary>The run failed and a failure batch was sent (or buffered).</summary>
     Failed,
 
-    /// <summary>The server refused a batch; the snapshot is incomplete.</summary>
+    /// <summary>
+    /// A batch was refused or lost; the snapshot is incomplete and its job is closed with a
+    /// failure report.
+    /// </summary>
     Rejected,
 
-    /// <summary>The service is stopping; nothing was reported.</summary>
+    /// <summary>The service stopped during discovery; nothing was reported.</summary>
     Cancelled
 }
 
@@ -132,31 +139,34 @@ public sealed class CollectorDiscoveryRunner : ICollectorDiscoveryRunner
             return await ReportFailureAsync(integration, "DISCOVERY_FAILED", reason, result.Errors, result.Warnings, result.Statistics);
         }
 
-        var batches = BuildBatches(result, integration.IntegrationId, _options.BatchSize);
+        var batches = BuildBatches(result, integration.IntegrationId, _options.BatchSize,
+            _options.RelationshipBatchSize, _options.MaxBatchBytes);
         var snapshotId = Guid.NewGuid();
+        var buffered = 0;
         for (var i = 0; i < batches.Count; i++)
         {
             var final = i == batches.Count - 1;
-            var delivery = await _client.SubmitSnapshotBatchAsync(batches[i], snapshotId, i, final, CancellationToken.None);
+            // The stopping token only changes how the batch travels: once the service is
+            // stopping, the client buffers this and every later batch instead of sending it, so
+            // the snapshot is finished from the offline queue after the restart.
+            var delivery = await _client.SubmitSnapshotBatchAsync(batches[i], snapshotId, i, final, cancellationToken);
+            if (delivery == BatchDelivery.Buffered && cancellationToken.IsCancellationRequested)
+                buffered++;
             if (delivery != BatchDelivery.Rejected)
                 continue;
 
-            _logger.LogError("Batch {Batch} of {Total} for integration {IntegrationId} was rejected; the snapshot is incomplete.",
+            // The client closes the server job of the incomplete snapshot with a failure report
+            // (COLLECTOR_BATCH_REJECTED / COLLECTOR_BATCH_LOST); nothing else of it is sent.
+            _logger.LogError("Batch {Batch} of {Total} for integration {IntegrationId} was not accepted; the snapshot is incomplete and is reported as failed.",
                 i + 1, batches.Count, integration.IntegrationId);
-            if (!final)
-            {
-                // Close the server job of a half-sent snapshot instead of leaving it open until the
-                // server sweeps it; when even the first batch was refused, report on a new job.
-                var failure = BuildFailureBatch(integration.IntegrationId,
-                    new[] { $"COLLECTOR_BATCH_REJECTED: The server refused batch {i + 1} of {batches.Count}; the snapshot is incomplete." }
-                        .Concat(result.Errors).ToList(),
-                    result.Warnings, new Dictionary<string, int>());
-                if (i == 0)
-                    await _client.SubmitSnapshotBatchAsync(failure, Guid.NewGuid(), 0, final: true, CancellationToken.None);
-                else
-                    await _client.SubmitSnapshotBatchAsync(failure, snapshotId, i + 1, final: true, CancellationToken.None);
-            }
             return new DiscoveryRunOutcome(DiscoveryRunStatus.Rejected, result.Nodes.Count, result.Relationships.Count, i + 1);
+        }
+
+        if (buffered > 0)
+        {
+            _logger.LogInformation(
+                "The service is stopping: {Buffered} of {Total} batches of integration {IntegrationId} were buffered and are sent after the restart.",
+                buffered, batches.Count, integration.IntegrationId);
         }
 
         var status = result.Success && result.Errors.Count == 0 ? DiscoveryRunStatus.Completed : DiscoveryRunStatus.Partial;
@@ -166,33 +176,79 @@ public sealed class CollectorDiscoveryRunner : ICollectorDiscoveryRunner
         return new DiscoveryRunOutcome(status, result.Nodes.Count, result.Relationships.Count, batches.Count);
     }
 
+    /// <summary>Envelope of a batch (integration id, status, timestamps) plus JSON punctuation slack.</summary>
+    private const long BatchEnvelopeBytes = 4096;
+
+    private static readonly JsonSerializerOptions WireOptions = new(JsonSerializerDefaults.Web);
+
     /// <summary>
-    /// Splits a result into submit-batch payloads: nodes in chunks of
-    /// <paramref name="batchSize"/>; the final batch carries every relationship
-    /// (their endpoints are then all known to the server) and the run outcome:
-    /// Success, Status, errors, warnings and statistics. The server accumulates
-    /// these over the batches of a job, so they are sent once. Earlier batches
-    /// are plain slices (Success=true, Status "InProgress").
+    /// Splits a result into submit-batch payloads: the nodes first, then the relationships (their
+    /// endpoints are then known to the server), packed in order. A batch holds at most
+    /// <paramref name="batchSize"/> nodes, <paramref name="relationshipBatchSize"/> relationships
+    /// and about <paramref name="maxBatchBytes"/> of JSON, so no request comes near the server's
+    /// body limit however large the source is (an item larger than the limit travels alone). The
+    /// last batch is the final one and carries the run outcome: Success, Status, errors, warnings
+    /// and statistics. The server accumulates these over the batches of a job, so they are sent
+    /// once. Earlier batches are plain slices (Success=true, Status "InProgress").
     /// </summary>
-    public static IReadOnlyList<DiscoveryResult> BuildBatches(DiscoveryResult result, Guid integrationId, int batchSize)
+    public static IReadOnlyList<DiscoveryResult> BuildBatches(
+        DiscoveryResult result,
+        Guid integrationId,
+        int batchSize,
+        int relationshipBatchSize = CollectorOptions.DefaultRelationshipBatchSize,
+        long maxBatchBytes = CollectorOptions.DefaultMaxBatchMb * 1024L * 1024L)
     {
         batchSize = Math.Max(1, batchSize);
-        var nodeChunks = result.Nodes.Chunk(batchSize).ToList();
-        if (nodeChunks.Count == 0)
-            nodeChunks.Add(Array.Empty<DiscoveredNodeContract>());
+        relationshipBatchSize = Math.Max(1, relationshipBatchSize);
 
-        var batches = new List<DiscoveryResult>(nodeChunks.Count);
-        for (var i = 0; i < nodeChunks.Count; i++)
+        // Every batch keeps room for the outcome, which only the final one carries.
+        var outcomeBytes = Size(result.Errors) + Size(result.Warnings) + Size(result.Statistics) + Size(result.SourceVersion);
+        var itemBudget = Math.Max(maxBatchBytes / 2, maxBatchBytes - BatchEnvelopeBytes - outcomeBytes);
+
+        var chunks = new List<(List<DiscoveredNodeContract> Nodes, List<DiscoveredRelationshipContract> Relationships)>();
+        var nodes = new List<DiscoveredNodeContract>();
+        var relationships = new List<DiscoveredRelationshipContract>();
+        long bytes = 0;
+
+        void Flush()
         {
-            var final = i == nodeChunks.Count - 1;
+            chunks.Add((nodes, relationships));
+            nodes = new List<DiscoveredNodeContract>();
+            relationships = new List<DiscoveredRelationshipContract>();
+            bytes = 0;
+        }
+
+        foreach (var node in result.Nodes)
+        {
+            var size = Size(node) + 1;
+            if (nodes.Count + relationships.Count > 0 && (nodes.Count >= batchSize || bytes + size > itemBudget))
+                Flush();
+            nodes.Add(node);
+            bytes += size;
+        }
+        foreach (var relationship in result.Relationships)
+        {
+            var size = Size(relationship) + 1;
+            if (nodes.Count + relationships.Count > 0 && (relationships.Count >= relationshipBatchSize || bytes + size > itemBudget))
+                Flush();
+            relationships.Add(relationship);
+            bytes += size;
+        }
+        if (chunks.Count == 0 || nodes.Count + relationships.Count > 0)
+            Flush();
+
+        var batches = new List<DiscoveryResult>(chunks.Count);
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            var final = i == chunks.Count - 1;
             batches.Add(new DiscoveryResult
             {
                 IntegrationId = integrationId,
                 SourceVersion = result.SourceVersion,
-                Nodes = nodeChunks[i].ToList(),
+                Nodes = chunks[i].Nodes,
+                Relationships = chunks[i].Relationships,
                 Success = !final || result.Success,
                 Status = final ? result.Status : "InProgress",
-                Relationships = final ? result.Relationships.ToList() : new List<DiscoveredRelationshipContract>(),
                 Errors = final ? result.Errors.ToList() : new List<string>(),
                 Warnings = final ? result.Warnings.ToList() : new List<string>(),
                 Statistics = final ? new Dictionary<string, int>(result.Statistics) : new Dictionary<string, int>(),
@@ -202,6 +258,9 @@ public sealed class CollectorDiscoveryRunner : ICollectorDiscoveryRunner
         }
         return batches;
     }
+
+    /// <summary>Serialized size as the client sends it (System.Net.Http.Json web defaults).</summary>
+    private static long Size<T>(T value) => value == null ? 0 : JsonSerializer.SerializeToUtf8Bytes(value, WireOptions).LongLength;
 
     /// <summary>The single final batch that reports a failed run: Success=false, the errors, no nodes.</summary>
     public static DiscoveryResult BuildFailureBatch(
