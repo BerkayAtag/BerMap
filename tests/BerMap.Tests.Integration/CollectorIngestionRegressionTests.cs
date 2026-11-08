@@ -263,6 +263,8 @@ public sealed class CollectorIngestionRegressionTests : IAsyncLifetime
         var integration = await AddCollectorIntegrationAsync();
         using var failing = _factory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
             services.AddScoped<IDiscoveryIngestionService, FailingIngestionService>()));
+        // A derived factory starts its own host; /api answers 503 until it is ready.
+        await failing.WaitUntilReadyAsync();
         using var client = failing.CreateClient();
 
         var response = await SubmitAsync(client, Batch(integration, new[] { Host("f:") }), final: true);

@@ -1,6 +1,8 @@
+import { apiRequest, uniqueName } from '../support/api';
 import { test, expect } from '../support/fixtures';
 import { expectDialogFocusCycle, expectFocusTrapped } from '../support/focus';
 import { BASELINE_SNAPSHOT, COLLECTOR_NAME } from '../support/seed';
+import { adminToken } from '../support/state';
 
 /*
  * Keyboard use of every modal dialog: opened with Enter, focus moves in, Tab
@@ -84,6 +86,8 @@ test.describe('İletişim kutuları · klavye odağı', () => {
   });
 
   test('snapshot oluşturma, karşılaştırma, detay ve doğrulama', async ({ page, problems }) => {
+    // Comparing needs two snapshots; on a fresh database only the seeded one exists.
+    await apiRequest('POST', '/api/snapshots', { token: adminToken(), body: { name: uniqueName('E2E dialog') } });
     await page.goto('/snapshots');
     const create = page.getByRole('dialog', { name: 'Yeni snapshot' });
     await expectDialogFocusCycle(page, page.getByRole('button', { name: /Yeni Snapshot/ }), create);
