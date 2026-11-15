@@ -71,13 +71,12 @@ public sealed class InventoryService : IInventoryService
         if (request.IsStale.HasValue)
             query = query.Where(n => n.IsStale == request.IsStale.Value);
 
-        if (request.NeedsReview == true)
+        if (request.NeedsReview.HasValue)
         {
             query = query.Where(n =>
-                pendingReviewNodeIds.Contains(n.Id) ||
                 _context.ReconciliationReviews.Any(r =>
                     r.Status == ReconciliationReviewStatus.Pending &&
-                    (r.CreatedNodeId == n.Id || r.CandidateNodeId == n.Id)));
+                    (r.CreatedNodeId == n.Id || r.CandidateNodeId == n.Id)) == request.NeedsReview.Value);
         }
 
         var totalCount = await query.CountAsync(cancellationToken);

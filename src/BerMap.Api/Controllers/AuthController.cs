@@ -48,9 +48,10 @@ public class AuthController : ControllerBase
             return BadRequest(new { message = "Kullanıcı adı ve parola zorunludur.", code = "invalid_credentials" });
 
         var username = request.Username.Trim();
+        var normalizedUsername = username.ToLowerInvariant();
         var user = await _context.Users
             .Include(u => u.Roles).ThenInclude(r => r.Role)
-            .FirstOrDefaultAsync(u => u.Username.ToLower() == username.ToLower(), cancellationToken);
+            .FirstOrDefaultAsync(u => u.Username.ToLower() == normalizedUsername, cancellationToken);
 
         var passwordValid = PasswordHasher.Verify(request.Password, user?.PasswordHash ?? DummyHash);
         if (user == null || !user.IsActive || !passwordValid)

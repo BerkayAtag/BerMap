@@ -1,7 +1,7 @@
 {
   "name": "bermap-e2e",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.1",
   "description": "End-to-end browser tests for the BerMap web console against a real server and PostgreSQL.",
   "type": "module",
   "scripts": {

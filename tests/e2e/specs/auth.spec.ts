@@ -21,6 +21,24 @@ async function submitLogin(page: Page, password: string, labels = { password: 'P
 test.describe('Giriş', () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
+  test('depolama engelliyken giriş ve API istekleri çalışır', async ({ page }) => {
+    test.setTimeout(150_000);
+    await page.addInitScript(() => {
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === 'bermap-token') throw new DOMException('Storage blocked', 'SecurityError');
+        return original.call(this, key, value);
+      };
+    });
+    await page.goto('/login');
+    await page.getByLabel('Kullanıcı Adı').fill(ADMIN_USERNAME);
+    await submitLogin(page, adminPassword());
+    await expect(page).not.toHaveURL(/\/login$/);
+    await page.getByRole('link', { name: 'Envanter', exact: true }).first().click();
+    await expect(page.getByRole('heading', { level: 1, name: /Altyapı Envanteri/ })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: /FQDN, IP, MAC/ })).toBeVisible();
+  });
+
   test('korumalı rota girişe yönlendirir, hatalı parola reddedilir, doğru parola hedef sayfayı açar', async ({
     page,
     problems,

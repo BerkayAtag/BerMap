@@ -99,6 +99,7 @@ public class LocalBufferQueue : IOfflineQueue
     private readonly int _maxRetries;
     private readonly ILogger<LocalBufferQueue> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private long _lastItemTicks;
 
     public LocalBufferQueue(
         string? storageDirectory = null,
@@ -113,6 +114,15 @@ public class LocalBufferQueue : IOfflineQueue
 
         Directory.CreateDirectory(_storageDirectory);
         RecoverAfterRestart();
+        // Keep FIFO order after a clock correction or a restart with future-dated items.
+        foreach (var file in Directory.EnumerateFiles(_storageDirectory, "*", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(file);
+            if (name.Length > 19 && name[19] == '_' &&
+                long.TryParse(name.AsSpan(0, 19), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) &&
+                ticks <= DateTime.MaxValue.Ticks)
+                _lastItemTicks = Math.Max(_lastItemTicks, ticks);
+        }
     }
 
     public event EventHandler<DiscardedQueueItem>? ItemsDiscarded;
@@ -137,18 +147,18 @@ public class LocalBufferQueue : IOfflineQueue
 
     private async Task<bool> EnqueueCoreAsync<T>(string queueName, T payload, string? tag, CancellationToken cancellationToken)
     {
-        var item = new QueueItem<T>
-        {
-            Id = NewItemId(tag),
-            QueueName = queueName,
-            EnqueuedAt = DateTime.UtcNow,
-            Payload = payload
-        };
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(item);
-
         await _lock.WaitAsync(cancellationToken);
         try
         {
+            var queueDir = QueueDirectory(queueName);
+            var item = new QueueItem<T>
+            {
+                Id = NewItemId(tag),
+                QueueName = queueName,
+                EnqueuedAt = DateTime.UtcNow,
+                Payload = payload
+            };
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(item);
             if (!EnsureCapacity(bytes.LongLength))
             {
                 _logger.LogError(
@@ -157,7 +167,6 @@ public class LocalBufferQueue : IOfflineQueue
                 return false;
             }
 
-            var queueDir = QueueDirectory(queueName);
             Directory.CreateDirectory(queueDir);
             await WriteAtomicAsync(Path.Combine(queueDir, item.Id + PendingExtension), bytes, cancellationToken);
             return true;
@@ -348,9 +357,10 @@ public class LocalBufferQueue : IOfflineQueue
             .ToList();
 
     /// <summary>Fixed-width UTC ticks keep ordinal file-name order equal to enqueue order.</summary>
-    private static string NewItemId(string? tag)
+    private string NewItemId(string? tag)
     {
-        var id = $"{DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture)}_{Guid.NewGuid():N}";
+        _lastItemTicks = Math.Max(DateTime.UtcNow.Ticks, _lastItemTicks + 1);
+        var id = $"{_lastItemTicks.ToString("D19", CultureInfo.InvariantCulture)}_{Guid.NewGuid():N}";
         return tag == null ? id : id + TagSeparator + tag;
     }
 

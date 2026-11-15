@@ -26,6 +26,25 @@ public class ChangeTrackingAndInventoryTests
     private static InventoryService CreateInventory(BerMapDbContext context) => new(
         context, new AuditService(context, new HttpContextAccessor()), NullLogger<InventoryService>.Instance);
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReviewFilter_RespectsBothValues(bool needsReview)
+    {
+        await using var context = CreateContext();
+        var reviewed = new InfrastructureNode { Name = "review" };
+        var clean = new InfrastructureNode { Name = "clean" };
+        context.InfrastructureNodes.AddRange(reviewed, clean);
+        context.ReconciliationReviews.Add(new ReconciliationReview
+        {
+            CreatedNodeId = reviewed.Id,
+            Status = ReconciliationReviewStatus.Pending
+        });
+        await context.SaveChangesAsync();
+        var page = await CreateInventory(context).ListNodesAsync(new InventoryQueryRequest { NeedsReview = needsReview });
+        Assert.Equal(needsReview ? reviewed.Id : clean.Id, Assert.Single(page.Items).Id);
+    }
+
     private static DiscoveryResult Batch(Guid integrationId, string status) => new()
     {
         Success = true,

@@ -68,7 +68,7 @@ Assert-That 'server: writes the server data marker' { $server.Text -match "\`$da
 Assert-That 'collector: refuses the server data directory' { $collector.Text -match 'if \(Test-ServerDataDir \$DataDir\) \{\s*throw' }
 Assert-That 'collector installer: appsettings.Production.json does not identify a collector data directory' {
     $state = $collector.Text.Substring($collector.Text.IndexOf('$dataDirState = '))
-    $state = $state.Substring(0, $state.IndexOf("`n`n"))
+    $state = ($state -split '\r?\n\r?\n', 2)[0]
     $state -notmatch 'appsettings'
 }
 Assert-That 'collector uninstaller: appsettings.Production.json does not identify a collector data directory' {

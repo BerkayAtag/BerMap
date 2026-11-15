@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { User } from '@/types';
-import { TOKEN_STORAGE_KEY, api, getStoredToken, setForbiddenHandler, setUnauthorizedHandler } from '@/lib/api';
+import { api, getStoredToken, setSessionToken, setForbiddenHandler, setUnauthorizedHandler } from '@/lib/api';
 import { queryClient } from '@/lib/queryClient';
 import type { SignOutReason } from '@/components/auth/loginText';
 
@@ -21,12 +21,7 @@ interface AuthState {
 }
 
 function writeToken(token: string | null): void {
-  try {
-    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    else localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch {
-    // Storage unavailable (private mode); the session simply will not persist.
-  }
+  setSessionToken(token);
 }
 
 const initialToken = getStoredToken();
@@ -54,11 +49,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
   refreshProfile: () => {
     if (!profileRefresh) {
+      const requestedToken = get().token;
       profileRefresh = api
         .get<User>('/auth/me')
         .then((me) => {
           const previous = get().user;
-          if (!get().token || !me) return;
+          if (!requestedToken || get().token !== requestedToken || !me) return;
           set({ user: me, isAuthenticated: true });
           // Lists fetched under the old role may now be allowed or forbidden.
           if (previous && previous.role !== me.role) void queryClient.invalidateQueries();

@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactECharts from 'echarts-for-react';
+import 'echarts/theme/v5';
 import { useLocale } from '@/lib/i18n';
 import { useThemeTokens } from '@/hooks/useThemeTokens';
 import { formatNumber, formatPercent } from '@/lib/format';
@@ -105,6 +106,7 @@ export const SystemHealthChart: React.FC<SystemHealthChartProps> = ({
           draws in. With a stretching container they drift apart. */}
       <div className="w-full h-[300px] relative my-auto">
         <ReactECharts
+          theme="v5"
           option={option}
           notMerge
           style={{ height: '100%', width: '100%' }}

@@ -61,6 +61,7 @@ jobs:
             }
             if ($failed) { exit 1 }'
           pwsh -NoProfile -NonInteractive -File deploy/tests/collector-config.ps1
+          pwsh -NoProfile -NonInteractive -File deploy/tests/windows-installers.ps1
       - name: Sunucu ve collector paketleri
         env:
           VERSION: ${{ steps.version.outputs.version }}

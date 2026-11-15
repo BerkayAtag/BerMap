@@ -118,7 +118,7 @@ public class AuditController : ControllerBase
 
         if (!string.IsNullOrWhiteSpace(request.Username))
         {
-            var username = request.Username.Trim().ToLower();
+            var username = request.Username.Trim().ToLowerInvariant();
             query = query.Where(a => a.Username.ToLower().Contains(username));
         }
 

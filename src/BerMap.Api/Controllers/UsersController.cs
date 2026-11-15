@@ -71,7 +71,8 @@ public class UsersController : ControllerBase
         if (PasswordPolicy.Validate(request.Password, username) is { } passwordError)
             return Problem400("weak_password", passwordError);
 
-        if (await _context.Users.AnyAsync(u => u.Username.ToLower() == username.ToLower(), cancellationToken))
+        var normalizedUsername = username.ToLowerInvariant();
+        if (await _context.Users.AnyAsync(u => u.Username.ToLower() == normalizedUsername, cancellationToken))
             return Conflict(new { message = "Bu kullanıcı adı zaten kullanılıyor.", code = "username_taken" });
 
         var role = await _context.Roles.FirstAsync(r => r.RoleType == roleType, cancellationToken);

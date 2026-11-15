@@ -5,7 +5,7 @@
 <p align="center"><b>Altyapınızı haritalayın. Değişikliği önce simülasyonda deneyin.</b><br>Kurum içi keşif · Bağımlılık haritası · Etki ve kapasite simülasyonu</p>
 
 <p align="center">
-  <a href="https://github.com/BerkayAtag/BerMap/releases/latest"><b>Sunucu paketini indir (0.4.0)</b></a> ·
+  <a href="https://github.com/BerkayAtag/BerMap/releases/latest"><b>Sunucu paketini indir (0.4.1)</b></a> ·
   <a href="https://berkayatag.github.io/BerMap/">Tanıtım sayfası</a> ·
   <a href="deploy/KURULUM.md">Kurulum</a> ·
   <a href="CHANGELOG.md">Sürüm geçmişi</a> ·
@@ -23,13 +23,13 @@ BerMap, Active Directory ve VMware vCenter'ı **salt okunur** keşfeder; sunucul
 
 [Son sürüm](https://github.com/BerkayAtag/BerMap/releases/latest) sayfasından sunucu paketini ve `SHA256SUMS.txt` dosyasını indirin. Paketler self-contained'dir (sunucuda .NET gerekmez) ve web konsolunu içerir. Tek ön koşul erişilebilir bir **PostgreSQL 16+** sunucusudur; BerMap veritabanını ve şemayı ilk açılışta kurar.
 
-**Windows Server** — `BerMap-Server-0.4.0-win-x64.zip` paketini açıp yönetici PowerShell'de:
+**Windows Server** — `BerMap-Server-0.4.1-win-x64.zip` paketini açıp yönetici PowerShell'de:
 
 ```powershell
 .\Install-BerMapServer.ps1 -DbHost localhost -DbUser bermap
 ```
 
-**Linux (systemd)** — `bermap-server-0.4.0-linux-x64.tar.gz` (veya `linux-arm64`):
+**Linux (systemd)** — `bermap-server-0.4.1-linux-x64.tar.gz` (veya `linux-arm64`):
 
 ```bash
 sudo ./install.sh --db-host localhost --db-user bermap
@@ -91,7 +91,7 @@ Tek bir .NET 10 sunucusu (modüler monolit) API'yi, keşif işçisini, zamanlay�
 
 ## Geliştirme
 
-Gerekenler: .NET 10 SDK, Node.js 20+, PostgreSQL 16+ (`docker run -d -p 5432:5432 -e POSTGRES_USER=bermap_dev -e POSTGRES_PASSWORD=bermap_dev -e POSTGRES_DB=bermap_dev postgres:17-alpine`).
+Gerekenler: .NET 10 SDK, Node.js 22.16+, PostgreSQL 16+ (`docker run -d -p 5432:5432 -e POSTGRES_USER=bermap_dev -e POSTGRES_PASSWORD=bermap_dev -e POSTGRES_DB=bermap_dev postgres:17-alpine`).
 
 ```bash
 cd src/BerMap.Api && dotnet run --launch-profile http        # http://localhost:5294

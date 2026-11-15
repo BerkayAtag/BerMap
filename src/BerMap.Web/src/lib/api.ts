@@ -8,6 +8,16 @@ type ForbiddenHandler = (path: string) => void;
 
 let unauthorizedHandler: UnauthorizedHandler | null = null;
 let forbiddenHandler: ForbiddenHandler | null = null;
+let sessionToken: string | null | undefined;
+
+/** Keep the active session usable even when browser storage is disabled. */
+export function setSessionToken(token: string | null): void {
+  sessionToken = token;
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch { /* The session remains available in memory. */ }
+}
 
 /**
  * Registers the callback invoked when an authenticated request is rejected with 401.
@@ -26,6 +36,7 @@ export function setForbiddenHandler(handler: ForbiddenHandler | null): void {
 }
 
 export function getStoredToken(): string | null {
+  if (sessionToken !== undefined) return sessionToken;
   try {
     return localStorage.getItem(TOKEN_STORAGE_KEY);
   } catch {
@@ -33,8 +44,7 @@ export function getStoredToken(): string | null {
   }
 }
 
-function getAuthHeaders(): HeadersInit {
-  const token = getStoredToken();
+function getAuthHeaders(token: string | null): HeadersInit {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -53,22 +63,18 @@ function handleUnauthorized(): void {
     unauthorizedHandler();
     return;
   }
-  try {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch {
-    // Storage unavailable; nothing to clear.
-  }
+  setSessionToken(null);
   if (window.location.pathname !== '/login') {
     window.location.assign('/login');
   }
 }
 
-async function handleResponse<T>(path: string, response: Response): Promise<T> {
+async function handleResponse<T>(path: string, response: Response, token: string | null): Promise<T> {
   if (!response.ok) {
-    if (response.status === 401 && !isLoginRequest(path)) {
+    if (response.status === 401 && token === getStoredToken() && !isLoginRequest(path)) {
       handleUnauthorized();
     }
-    if (response.status === 403 && forbiddenHandler) {
+    if (response.status === 403 && token === getStoredToken() && forbiddenHandler) {
       forbiddenHandler(path);
     }
 
@@ -103,12 +109,13 @@ async function handleResponse<T>(path: string, response: Response): Promise<T> {
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const hasBody = body !== undefined && body !== null;
+  const token = getStoredToken();
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
-    headers: getAuthHeaders(),
+    headers: getAuthHeaders(token),
     body: hasBody ? JSON.stringify(body) : undefined,
   });
-  return handleResponse<T>(path, response);
+  return handleResponse<T>(path, response, token);
 }
 
 export const api = {

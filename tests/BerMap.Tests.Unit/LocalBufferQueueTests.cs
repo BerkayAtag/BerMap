@@ -37,6 +37,24 @@ public class LocalBufferQueueTests : IDisposable
     private static DiscoveryResult Batch(int seconds) => new() { Success = true, Duration = TimeSpan.FromSeconds(seconds) };
 
     [Fact]
+    public async Task RestartAfterClockMovesBack_PreservesPendingOrder()
+    {
+        await _queue.EnqueueAsync(Queue, Batch(1));
+        var original = Directory.GetFiles(QueueDir, "*.json").Single();
+        var futureId = $"{DateTime.UtcNow.AddDays(1).Ticks:D19}_{Guid.NewGuid():N}";
+        var content = await File.ReadAllTextAsync(original);
+        content = content.Replace(Path.GetFileNameWithoutExtension(original), futureId);
+        var future = Path.Combine(QueueDir, futureId + ".json");
+        await File.WriteAllTextAsync(future, content);
+        File.Delete(original);
+
+        var restarted = new LocalBufferQueue(_tempDir);
+        await restarted.EnqueueAsync(Queue, Batch(2));
+        Assert.Equal(TimeSpan.FromSeconds(1), (await restarted.DequeueAsync<DiscoveryResult>(Queue))!.Payload.Duration);
+        Assert.Equal(TimeSpan.FromSeconds(2), (await restarted.DequeueAsync<DiscoveryResult>(Queue))!.Payload.Duration);
+    }
+
+    [Fact]
     public async Task EnqueueAndDequeue_MaintainsFifoOrder()
     {
         // Arrange
