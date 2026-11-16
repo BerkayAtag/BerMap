@@ -80,8 +80,8 @@ test.describe('Envanter', () => {
       await expect(page.getByRole('cell', { name: new RegExp(`^esx0${i}\\.corp\\.bermap\\.demo`) })).toBeVisible();
     }
     // Only hypervisors remain (other tests may add their own hosts).
-    const types = await page.getByRole('table').getByRole('row').locator('td:nth-child(2)').allInnerTexts();
-    expect(new Set(types)).toEqual(new Set(['Hypervisor']));
+    await expect.poll(async () => new Set(await page.getByRole('table').getByRole('row')
+      .locator('td:nth-child(2)').allInnerTexts())).toEqual(new Set(['Hypervisor']));
     problems.expectNone();
   });
 

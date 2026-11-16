@@ -1,11 +1,12 @@
 # Sürüm geçmişi
 
-## 0.4.1 — 2026-11-15
+## 0.4.1 — 2026-11-16
 
 - Türkçe Windows'ta büyük harfli kullanıcı adlarıyla giriş, mükerrer hesap kontrolü ve denetim araması düzeltildi.
 - Tarayıcı depolaması engellendiğinde oturum bellekte tutuluyor; eski isteğin 401/403 yanıtı yeni oturumu etkilemiyor, gecikmiş profil yanıtı farklı kullanıcıya uygulanmıyor.
 - Collector çevrimdışı kuyruğu eşit zaman damgaları ve saat düzeltmeleri sırasında FIFO sırasını koruyor; yeniden başlatmada mevcut kuyruğun sonundan devam ediyor.
 - Envanterin `needsReview=false` filtresi artık inceleme beklemeyen düğümleri getiriyor.
+- Snapshot detay, karşılaştırma ve doğrulama sorgularında düğüm ve ilişki sayılarının çarpımı kadar satır üreten JOIN kaldırıldı; değişmez koleksiyonlar ayrı okunuyor.
 - Windows CRLF kurulum kontrolü düzeltildi; Windows birim testleri ve PowerShell 5.1 kurulum kontrolleri CI'a eklendi.
 - Grafik ve lint bağımlılıklarının güvenlik güncellemeleri; grafiklerde önceki tema korunuyor.
 

@@ -188,11 +188,7 @@ public sealed class SnapshotService : ISnapshotService
 
     public async Task<SnapshotGraphDto?> GetSnapshotGraphAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        var snapshot = await _context.Snapshots
-            .AsNoTracking()
-            .Include(s => s.Nodes)
-            .Include(s => s.Relationships)
-            .FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+        var snapshot = await LoadGraphAsync(id, cancellationToken);
 
         if (snapshot == null)
             return null;
@@ -350,8 +346,11 @@ public sealed class SnapshotService : ISnapshotService
 
     private async Task<Snapshot?> LoadGraphAsync(Guid id, CancellationToken cancellationToken)
     {
+        // Immutable snapshots can be read in separate queries without drift.
+        // Joining both collections multiplies rows by node count * relationship count.
         return await _context.Snapshots
             .AsNoTracking()
+            .AsSplitQuery()
             .Include(s => s.Nodes)
             .Include(s => s.Relationships)
             .FirstOrDefaultAsync(s => s.Id == id, cancellationToken);

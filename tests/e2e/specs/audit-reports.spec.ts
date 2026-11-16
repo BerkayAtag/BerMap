@@ -12,9 +12,8 @@ test.describe('Denetim Günlükleri', () => {
     await page.getByRole('button', { name: 'Uygula' }).click();
     const rows = page.getByRole('table').getByRole('row').filter({ has: page.getByRole('cell') });
     await expect(rows.first()).toContainText('Auth.Login');
-    const actions = await rows.locator('td:nth-child(3)').allInnerTexts();
-    expect(actions.length).toBeGreaterThan(0);
-    expect(new Set(actions)).toEqual(new Set(['Auth.Login']));
+    await expect.poll(async () => new Set(await rows.locator('td:nth-child(3)').allInnerTexts()))
+      .toEqual(new Set(['Auth.Login']));
 
     const first = rows.first().getByRole('button').first();
     await first.click();

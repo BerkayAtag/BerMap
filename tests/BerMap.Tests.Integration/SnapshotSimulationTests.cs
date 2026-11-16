@@ -112,6 +112,32 @@ public sealed class SnapshotSimulationTests : IAsyncLifetime
         result.GetProperty("recommendationItems").EnumerateArray().Select(e => e.GetProperty("code").GetString()!).ToArray();
 
     [Fact]
+    public async Task LargeSnapshot_CanBeReadAndVerifiedWithoutCollectionJoin()
+    {
+        if (_factory == null) return;
+        await WithContextAsync(async context =>
+        {
+            var nodes = Enumerable.Range(0, 500).Select(i => Node($"large-{i}", NodeType.VirtualMachine)).ToArray();
+            context.InfrastructureNodes.AddRange(nodes);
+            context.InfrastructureRelationships.AddRange(Enumerable.Range(1, 499)
+                .Select(i => Rel(nodes[i], nodes[0], RelationshipType.DependsOn)));
+            await context.SaveChangesAsync();
+        });
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", await LoginAsync(client));
+        var created = await client.PostAsJsonAsync("/api/snapshots", new { name = "large-graph" });
+        created.EnsureSuccessStatusCode();
+        var id = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+        var verification = await client.GetFromJsonAsync<JsonElement>($"/api/snapshots/{id}/verify");
+        Assert.True(verification.GetProperty("isValid").GetBoolean());
+        Assert.Equal(500, verification.GetProperty("actualNodeCount").GetInt32());
+        Assert.Equal(499, verification.GetProperty("actualRelationshipCount").GetInt32());
+        var graph = await client.GetFromJsonAsync<JsonElement>($"/api/snapshots/{id}/graph");
+        Assert.Equal(500, graph.GetProperty("nodes").GetArrayLength());
+        Assert.Equal(499, graph.GetProperty("relationships").GetArrayLength());
+    }
+
+    [Fact]
     public async Task Simulation_OnSnapshot_SeesTheCapturedTopology_WhileLiveSeesTheVMotion()
     {
         if (_factory == null)
